@@ -1,0 +1,85 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        // ==================== 1. GDB 调试（g++ 编译的 exe） ====================
+        {
+            "name": "GDB 调试 (pmpd.exe)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\pmpd.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "为 gdb 启用整齐打印",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "build-g++-debug",
+            "presentation": {
+                "group": "debug",
+                "order": 1
+            }
+        },
+
+        // ==================== 2. GDB 调试 + 错误配置测试 ====================
+        {
+            "name": "GDB 调试 (错误配置测试)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\pmpd.exe",
+            "args": ["test_bad.ini"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "为 gdb 启用整齐打印",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "build-g++-debug",
+            "presentation": {
+                "group": "debug",
+                "order": 2
+            }
+        },
+
+        // ==================== 3. CMake Debug 构建 ====================
+        {
+            "name": "GDB 调试 (CMake Debug)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\build\\debug\\pmpc.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "为 gdb 启用整齐打印",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "cmake-debug-build",
+            "presentation": {
+                "group": "debug",
+                "order": 3
+            }
+        }
+    ]
+}

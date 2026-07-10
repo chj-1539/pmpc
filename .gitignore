@@ -1,0 +1,24 @@
+# === 编译产物 ===
+pmpc.exe
+pmpd.exe
+*.o
+build/obj/
+
+# === CMake ===
+build/release/
+build/debug/
+
+# === 日志 ===
+logs/
+
+# === IDE ===
+.vs/
+*.suo
+*.user
+*.sdf
+*.VC.db
+
+# === Windows ===
+*.exe
+*.dll
+Thumbs.db

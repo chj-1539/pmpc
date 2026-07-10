@@ -1,0 +1,149 @@
+{
+    "version": "2.0.0",
+    "options": {
+        "cwd": "${workspaceFolder}"
+    },
+    "tasks": [
+        {
+            "label": "build-g++",
+            "detail": "g++ compile (MinGW-W64, .o → build/obj/)",
+            "type": "shell",
+            "options": {
+                "shell": {
+                    "executable": "cmd.exe",
+                    "args": ["/d", "/c"]
+                }
+            },
+            "command": "build_gpp.bat",
+            "args": ["release"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            }
+        },
+        {
+            "label": "build-g++-debug",
+            "detail": "g++ debug (-O0 -g, .o → build/obj/)",
+            "type": "shell",
+            "options": {
+                "shell": {
+                    "executable": "cmd.exe",
+                    "args": ["/d", "/c"]
+                }
+            },
+            "command": "build_gpp.bat",
+            "args": ["debug"],
+            "group": "build",
+            "problemMatcher": ["$gcc"],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            }
+        },
+        {
+            "label": "cmake-release",
+            "detail": "CMake Release configure",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["-S", ".", "-B", "build/release", "-DCMAKE_BUILD_TYPE=Release"],
+            "group": "build",
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$gcc"],
+            "presentation": { "echo": true, "reveal": "always", "focus": false, "panel": "shared" }
+        },
+        {
+            "label": "cmake-release-build",
+            "detail": "CMake Release build",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build/release", "--config", "Release"],
+            "group": "build",
+            "problemMatcher": ["$gcc"],
+            "presentation": { "echo": true, "reveal": "always", "focus": false, "panel": "shared" }
+        },
+        {
+            "label": "cmake-debug",
+            "detail": "CMake Debug configure",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["-S", ".", "-B", "build/debug", "-DCMAKE_BUILD_TYPE=Debug"],
+            "group": "build",
+            "problemMatcher": ["$gcc"],
+            "presentation": { "echo": true, "reveal": "always", "focus": false, "panel": "shared" }
+        },
+        {
+            "label": "cmake-debug-build",
+            "detail": "CMake Debug build",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build/debug", "--config", "Debug"],
+            "group": "build",
+            "problemMatcher": ["$gcc"],
+            "presentation": { "echo": true, "reveal": "always", "focus": false, "panel": "shared" }
+        },
+        {
+            "label": "run",
+            "detail": "Run pmpc.exe",
+            "type": "shell",
+            "command": "${workspaceFolder}\\pmpc.exe",
+            "dependsOn": ["build-g++"],
+            "group": { "kind": "test", "isDefault": true },
+            "presentation": { "echo": true, "reveal": "always", "focus": true, "panel": "dedicated" }
+        },
+        {
+            "label": "clean",
+            "detail": "Clean build artifacts (.o, exe) and logs",
+            "type": "shell",
+            "command": "cmd",
+            "args": ["/c", "call build_gpp.bat clean & if exist logs rmdir /s /q logs & echo done"],
+            "problemMatcher": []
+        },
+        // ─── 测试任务 ─────────────────────────────────────────────────
+        {
+            "label": "test-all",
+            "detail": "Build and run all unit tests (build_tests.bat)",
+            "type": "shell",
+            "command": "build_tests.bat",
+            "group": "test",
+            "problemMatcher": ["$gcc"],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated",
+                "clear": true
+            }
+        },
+        {
+            "label": "test-clean",
+            "detail": "Clean test build artifacts",
+            "type": "shell",
+            "command": "build_tests.bat",
+            "args": ["clean"],
+            "group": "test",
+            "problemMatcher": []
+        },
+        {
+            "label": "test-list",
+            "detail": "List all available tests",
+            "type": "shell",
+            "command": "build_tests.bat",
+            "args": ["list"],
+            "group": "test",
+            "problemMatcher": []
+        }
+    ]
+}

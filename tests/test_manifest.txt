@@ -1,0 +1,30 @@
+#=============================================================================
+# test_manifest.txt — PMPC 测试清单
+# 格式: test_name | test_source.cxx | dep1.cxx dep2.cxx ...
+#   - test_name: 可执行文件名 (不含 .exe)
+#   - test_source.cxx: tests/ 目录下的测试源文件
+#   - dep1.cxx ...: 被测生产源文件 (相对于项目根目录)
+# 注释以 # 开头, 空行被忽略
+#=============================================================================
+#
+# === Phase 0: 已有测试 ===
+test_protocol  | test_protocol.cxx  | src/protocol.cxx
+test_event_bus | test_event_bus.cxx |
+test_ini_reader| test_ini_reader.cxx| src/ini_reader.cxx
+test_soe_queue | test_soe_queue.cxx | src/soe_queue.cxx src/protocol.cxx
+test_data_mgr  | test_data_mgr.cxx  | src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx
+#
+# === Phase 2: 基础层测试 ===
+test_str_util     | test_str_util.cxx     |
+test_logger       | test_logger.cxx       |
+test_socket       | test_socket.cxx       | src/socket.cpp
+test_serial_port  | test_serial_port.cxx  | src/serial_port.cpp
+test_comm_io      | test_comm_io.cxx      | src/socket.cpp src/serial_port.cpp
+#
+# === Phase 3: 协议主站测试 (待添加) ===
+#
+# === Phase 4: 协议从站测试 (待添加) ===
+#
+# === Phase 5: 服务模块测试 (待添加) ===
+#
+# === Phase 6: 系统模块测试 (待添加) ===
