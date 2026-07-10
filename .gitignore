@@ -11,6 +11,10 @@ build/debug/
 # === 日志 ===
 logs/
 
+# === 测试运行时输出 ===
+tests/*.log
+tests/*.err
+
 # === IDE ===
 .vs/
 *.suo
