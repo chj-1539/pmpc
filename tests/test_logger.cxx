@@ -83,16 +83,14 @@ TEST_F(LoggerTest, LogStreamCanStreamMultipleTypes) {
     EXPECT_NE(out.find("str 42 3.14"), std::string::npos);
 }
 
-TEST_F(LoggerTest, BelowThresholdNotOutput) {
-    // At INFO level, DEBUG messages should be suppressed
-    // Note: The current Logger doesn't check level in Error/Warn/Info/Debug
-    // methods - it always constructs the LogStream. The level check needs
-    // to happen at the call site. This test documents the current behavior.
-    // We test that regardless, the LogStream destructor outputs.
+// 【特征化测试 / 已知 bug】TODO(logger-level-filter)
+// 现状：Logger::Debug()/Info()/Warn()/Error() 在被禁用级别下仍会构造 LogStream
+// 并在析构时无条件输出——级别过滤实际上从未生效。这个测试锁定当前（错误）
+// 行为，防止悄悄改回来。真正修复时应把断言翻转为 EXPECT_EQ(out.find(...), npos)。
+TEST_F(LoggerTest, TODO_BelowThresholdCurrentlyNotFiltered_BUG) {
     Clear();
     { Logger::Debug("Hidden") << "should not appear" << std::endl; }
-    // Currently LogStream always outputs on destruction regardless of level
-    // This documents that behavior - level filtering happens at call site
+    // 当前 LogStream 无视级别，析构时始终输出——bug。
     std::string out = Output();
     EXPECT_NE(out.find("[D][Hidden]"), std::string::npos);
 }

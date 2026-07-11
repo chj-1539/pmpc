@@ -33,8 +33,10 @@
 #include <functional>
 #include <algorithm>
 #include <iostream>
+#include <fstream>
 #include <sstream>
 #include <chrono>
+#include <random>
 
 // ==================== 颜色输出 (Windows) ====================
 // Win10+ 终端原生支持 ANSI 转义码, 无需 <windows.h> 介入
@@ -79,6 +81,10 @@ inline std::vector<TestResult>& Results() {
 
 // ==================== 断言日志 ====================
 
+// 前置声明：TestLog::Fail 会调用 FormatTraceStack（SCOPED_TRACE 栈打印）。
+// 真正定义见下方 ScopedTraceGuard 相关区块。
+inline std::string FormatTraceStack();
+
 class TestLog {
 public:
     static TestLog& Instance() {
@@ -94,7 +100,11 @@ public:
 
     void Fail(const char* file, int line, const std::string& msg) {
         failures_++;
-        stream_ << "    " << file << ":" << line << ": " << msg << "\n";
+        stream_ << "    " << file << ":" << line << ": " << msg;
+        // 自动附加 SCOPED_TRACE 栈
+        std::string trace = FormatTraceStack();
+        if (!trace.empty()) stream_ << trace;
+        stream_ << "\n";
     }
 
     int FailCount() const { return failures_; }
@@ -170,9 +180,49 @@ inline bool Register(const std::string& suite, const std::string& name,
     return true;
 }
 
-// ==================== --gtest_filter 支持 ====================
+// ==================== SCOPED_TRACE 栈 ====================
+
+struct ScopedTraceFrame {
+    const char* file;
+    int         line;
+    std::string msg;
+};
+
+inline std::vector<ScopedTraceFrame>& TraceStack() {
+    // 注：这里没做线程本地，测试内跨线程用 SCOPED_TRACE 目前不会隔离；
+    // 多线程测试请在主线程使用。
+    static thread_local std::vector<ScopedTraceFrame> stk;
+    return stk;
+}
+
+class ScopedTraceGuard {
+public:
+    ScopedTraceGuard(const char* file, int line, std::string msg) {
+        TraceStack().push_back({file, line, std::move(msg)});
+    }
+    ~ScopedTraceGuard() {
+        if (!TraceStack().empty()) TraceStack().pop_back();
+    }
+};
+
+inline std::string FormatTraceStack() {
+    const auto& s = TraceStack();
+    if (s.empty()) return {};
+    std::ostringstream os;
+    os << "\n    Trace (most recent first):";
+    for (auto it = s.rbegin(); it != s.rend(); ++it) {
+        os << "\n      " << it->file << ":" << it->line << ": " << it->msg;
+    }
+    return os.str();
+}
+
+// ==================== CLI 选项 ====================
 
 inline std::string GTestFilter;
+inline bool        GTestListOnly    = false;
+inline std::string GTestOutputXml;                       // 空 => 不产出 JUnit
+inline bool        GTestShuffle     = false;
+inline uint32_t    GTestShuffleSeed = 0;                  // 0 => 使用时基作种子
 
 /// 简单的 glob 匹配 (* 匹配任意字符序列, 包括 '.')
 inline bool GlobMatch(const std::string& s, const std::string& p) {
@@ -212,16 +262,107 @@ inline bool MatchesFilter(const std::string& fullName, const std::string& filter
     return GlobMatch(fullName, pattern);
 }
 
+// ==================== JUnit XML 输出 ====================
+
+inline std::string XmlEscape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '&':  out += "&amp;";  break;
+            case '<':  out += "&lt;";   break;
+            case '>':  out += "&gt;";   break;
+            case '"':  out += "&quot;"; break;
+            case '\'': out += "&apos;"; break;
+            default:
+                if ((unsigned char)c < 0x20 && c != '\n' && c != '\r' && c != '\t') {
+                    // 非法 XML 控制字符：跳过
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
+inline bool WriteJUnitXml(const std::string& path,
+                          const std::string& suiteAggregateName,
+                          int total, int failed, int64_t totalMs) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return false;
+    auto SecStr = [](int64_t ms) {
+        std::ostringstream o; o << (static_cast<double>(ms) / 1000.0); return o.str();
+    };
+    f << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    f << "<testsuites tests=\"" << total << "\" failures=\"" << failed
+      << "\" time=\"" << SecStr(totalMs) << "\">\n";
+    // 简化：按 suite 名分组
+    std::map<std::string, std::vector<const TestResult*>> bySuite;
+    for (const auto& r : Results()) bySuite[r.suiteName].push_back(&r);
+    for (auto& kv : bySuite) {
+        int sFail = 0; int64_t sMs = 0;
+        for (auto* r : kv.second) { if (!r->passed) sFail++; sMs += r->elapsedMs; }
+        f << "  <testsuite name=\"" << XmlEscape(kv.first) << "\" tests=\""
+          << kv.second.size() << "\" failures=\"" << sFail << "\" time=\""
+          << SecStr(sMs) << "\">\n";
+        for (auto* r : kv.second) {
+            f << "    <testcase classname=\"" << XmlEscape(r->suiteName)
+              << "\" name=\"" << XmlEscape(r->testName)
+              << "\" time=\"" << SecStr(r->elapsedMs) << "\"";
+            if (r->passed) {
+                f << "/>\n";
+            } else {
+                f << ">\n";
+                f << "      <failure message=\"failed\"><![CDATA[" << r->failuresStr
+                  << "]]></failure>\n";
+                f << "    </testcase>\n";
+            }
+        }
+        (void)suiteAggregateName;
+        f << "  </testsuite>\n";
+    }
+    f << "</testsuites>\n";
+    return true;
+}
+
 // ==================== 测试运行器 ====================
 
 inline int RunAllTests() {
+    // --gtest_list_tests：仅列出，不执行
+    if (GTestListOnly) {
+        std::string lastSuite;
+        for (const auto& e : Registry()) {
+            if (e.suiteName != lastSuite) {
+                std::cout << e.suiteName << ".\n";
+                lastSuite = e.suiteName;
+            }
+            std::cout << "  " << e.testName << "\n";
+        }
+        return 0;
+    }
+
     int total    = 0;
     int passed   = 0;
     int failed   = 0;
+    int skipped  = 0;
 
-    // 按 suite 分组
+    // 需要打乱执行顺序？直接对 Registry 副本洗牌（不动原表以保子进程行为稳定）
+    std::vector<TestEntry> plan = Registry();
+    if (GTestShuffle) {
+        uint32_t seed = GTestShuffleSeed;
+        if (seed == 0) {
+            seed = static_cast<uint32_t>(
+                std::chrono::steady_clock::now().time_since_epoch().count());
+        }
+        std::mt19937 rng(seed);
+        std::shuffle(plan.begin(), plan.end(), rng);
+        std::cout << Cyan() << "[  SHUFFLE ] " << Reset()
+                  << "seed=" << seed << "\n";
+    }
+
+    // 按 suite 分组（保持 plan 中出现顺序）
     std::vector<std::string> suites;
-    for (const auto& entry : Registry()) {
+    for (const auto& entry : plan) {
         if (std::find(suites.begin(), suites.end(), entry.suiteName) == suites.end())
             suites.push_back(entry.suiteName);
     }
@@ -232,7 +373,7 @@ inline int RunAllTests() {
         int suiteTotal = 0, suitePassed = 0;
 
         // 统计本 suite 需要跑的测试数
-        for (const auto& entry : Registry()) {
+        for (const auto& entry : plan) {
             if (entry.suiteName != suite) continue;
             std::string fullName = suite + "." + entry.testName;
             if (!MatchesFilter(fullName, GTestFilter)) continue;
@@ -243,10 +384,20 @@ inline int RunAllTests() {
         std::cout << Yellow() << "[----------] " << Reset()
                   << suiteTotal << " test(s) from " << suite << "\n";
 
-        for (const auto& entry : Registry()) {
+        for (const auto& entry : plan) {
             if (entry.suiteName != suite) continue;
             std::string fullName = suite + "." + entry.testName;
             if (!MatchesFilter(fullName, GTestFilter)) continue;
+
+            // DISABLED_ 前缀：跳过（同时兼容 suite 前缀或 test 前缀）
+            bool disabled = (entry.suiteName.rfind("DISABLED_", 0) == 0)
+                         || (entry.testName.rfind("DISABLED_", 0) == 0);
+            if (disabled) {
+                std::cout << Yellow() << "[   SKIP   ] " << Reset()
+                          << entry.testName << " (disabled)\n";
+                skipped++;
+                continue;
+            }
 
             total++;
             Test::CurrentSuiteName = entry.suiteName;
@@ -305,9 +456,21 @@ inline int RunAllTests() {
         std::cout << Red()   << "[  FAILED  ] " << Reset()
                   << failed << " test(s)\n";
     }
+    if (skipped > 0) {
+        std::cout << Yellow() << "[   SKIP   ] " << Reset()
+                  << skipped << " test(s) skipped\n";
+    }
     std::cout << Green() << "[==========] " << Reset()
               << total << " test(s), " << passed << " passed, "
               << failed << " failed, " << totalMs << " ms total\n";
+
+    // JUnit XML
+    if (!GTestOutputXml.empty()) {
+        if (!WriteJUnitXml(GTestOutputXml, "pmpc", total, failed, totalMs)) {
+            std::cerr << Red() << "[  ERROR   ] " << Reset()
+                      << "failed to write JUnit XML: " << GTestOutputXml << "\n";
+        }
+    }
 
     return failed > 0 ? 1 : 0;
 }
@@ -315,16 +478,34 @@ inline int RunAllTests() {
 // ==================== 初始化 ====================
 
 inline void InitGoogleTest(int* argc, char** argv) {
-    if (argc && argv) {
-        for (int i = 1; i < *argc; i++) {
-            std::string arg(argv[i]);
-            if (arg.find("--gtest_filter=") == 0) {
-                GTestFilter = arg.substr(std::string("--gtest_filter=").size());
-                // 从 argv 中移除该参数 (压缩)
-                for (int j = i; j < *argc - 1; j++) argv[j] = argv[j + 1];
-                (*argc)--;
-                i--;
-            }
+    if (!argc || !argv) return;
+    auto Consume = [&](int i) {
+        for (int j = i; j < *argc - 1; j++) argv[j] = argv[j + 1];
+        (*argc)--;
+    };
+    for (int i = 1; i < *argc; ) {
+        std::string arg(argv[i]);
+        if (arg.rfind("--gtest_filter=", 0) == 0) {
+            GTestFilter = arg.substr(std::string("--gtest_filter=").size());
+            Consume(i);
+        } else if (arg == "--gtest_list_tests") {
+            GTestListOnly = true;
+            Consume(i);
+        } else if (arg.rfind("--gtest_output=", 0) == 0) {
+            // 支持 --gtest_output=xml:path 与裸路径
+            std::string val = arg.substr(std::string("--gtest_output=").size());
+            const std::string pfx = "xml:";
+            GTestOutputXml = (val.rfind(pfx, 0) == 0) ? val.substr(pfx.size()) : val;
+            Consume(i);
+        } else if (arg == "--gtest_shuffle") {
+            GTestShuffle = true;
+            Consume(i);
+        } else if (arg.rfind("--gtest_random_seed=", 0) == 0) {
+            GTestShuffleSeed = static_cast<uint32_t>(
+                std::stoul(arg.substr(std::string("--gtest_random_seed=").size())));
+            Consume(i);
+        } else {
+            i++;
         }
     }
 }
@@ -439,6 +620,24 @@ do {                                                                            
     if (!(_a >= _b)) {                                                             \
         ::testing::internal::TestLog::Instance().Fail(                             \
             __FILE__, __LINE__, "EXPECT_GE(" #a ", " #b ") FAILED");              \
+    }                                                                              \
+} while(0)
+
+#define EXPECT_LT(a, b)                                                            \
+do {                                                                               \
+    auto _a = (a); auto _b = (b);                                                 \
+    if (!(_a < _b)) {                                                              \
+        ::testing::internal::TestLog::Instance().Fail(                             \
+            __FILE__, __LINE__, "EXPECT_LT(" #a ", " #b ") FAILED");              \
+    }                                                                              \
+} while(0)
+
+#define EXPECT_LE(a, b)                                                            \
+do {                                                                               \
+    auto _a = (a); auto _b = (b);                                                 \
+    if (!(_a <= _b)) {                                                             \
+        ::testing::internal::TestLog::Instance().Fail(                             \
+            __FILE__, __LINE__, "EXPECT_LE(" #a ", " #b ") FAILED");              \
     }                                                                              \
 } while(0)
 
@@ -579,6 +778,75 @@ do {                                                                            
         return;                                                                    \
     }                                                                              \
 } while(0)
+
+#define ASSERT_LT(a, b)                                                            \
+do {                                                                               \
+    auto _a = (a); auto _b = (b);                                                 \
+    if (!(_a < _b)) {                                                              \
+        ::testing::internal::TestLog::Instance().Fail(                             \
+            __FILE__, __LINE__, "ASSERT_LT(" #a ", " #b ") FAILED");              \
+        return;                                                                    \
+    }                                                                              \
+} while(0)
+
+#define ASSERT_LE(a, b)                                                            \
+do {                                                                               \
+    auto _a = (a); auto _b = (b);                                                 \
+    if (!(_a <= _b)) {                                                             \
+        ::testing::internal::TestLog::Instance().Fail(                             \
+            __FILE__, __LINE__, "ASSERT_LE(" #a ", " #b ") FAILED");              \
+        return;                                                                    \
+    }                                                                              \
+} while(0)
+
+#define ASSERT_DOUBLE_EQ(a, b)                                                     \
+do {                                                                               \
+    auto _a = (a); auto _b = (b);                                                 \
+    if (std::fabs(_a - _b) > 1e-6) {                                              \
+        std::ostringstream _msg;                                                   \
+        _msg << "ASSERT_DOUBLE_EQ(" #a ", " #b ") FAILED: "                       \
+             << _a << " != " << _b << " (diff=" << std::fabs(_a - _b) << ")";     \
+        ::testing::internal::TestLog::Instance().Fail(                             \
+            __FILE__, __LINE__, _msg.str());                                       \
+        return;                                                                    \
+    }                                                                              \
+} while(0)
+
+#define ASSERT_NEAR(a, b, eps)                                                     \
+do {                                                                               \
+    auto _a = (a); auto _b = (b); auto _e = (eps);                                \
+    auto _d = (_a > _b) ? (_a - _b) : (_b - _a);                                  \
+    if (_d > _e) {                                                                 \
+        std::ostringstream _msg;                                                   \
+        _msg << "ASSERT_NEAR(" #a ", " #b ", " #eps ") FAILED: "                  \
+             << _a << " - " << _b << " = " << _d << " > " << _e;                  \
+        ::testing::internal::TestLog::Instance().Fail(                             \
+            __FILE__, __LINE__, _msg.str());                                       \
+        return;                                                                    \
+    }                                                                              \
+} while(0)
+
+#define ASSERT_THROW_ANY(stmt)                                                     \
+do {                                                                               \
+    bool _caught = false;                                                          \
+    try { stmt; }                                                                  \
+    catch (...) { _caught = true; }                                                \
+    if (!_caught) {                                                                \
+        ::testing::internal::TestLog::Instance().Fail(                             \
+            __FILE__, __LINE__,                                                    \
+            "ASSERT_THROW_ANY(" #stmt ") did not throw");                         \
+        return;                                                                    \
+    }                                                                              \
+} while(0)
+
+// ==================== SCOPED_TRACE ====================
+//
+// 用法：TEST(...) { SCOPED_TRACE("iter=" + std::to_string(i)); EXPECT_...; }
+// 失败时 dump 栈。仅本线程可见。
+//
+#define SCOPED_TRACE(msg)                                                          \
+    ::testing::internal::ScopedTraceGuard PMPC_STG_##__LINE__(                     \
+        __FILE__, __LINE__, std::string() + (msg))
 
 #define ASSERT_NO_THROW(stmt)                                                      \
 do {                                                                               \

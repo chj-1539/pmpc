@@ -299,9 +299,10 @@ TEST(SafeStodTest, NegativeDouble) {
 
 TEST(NowMsTest, IsReasonable) {
     uint64_t now = NowMs();
-    // Current epoch milliseconds should be > 1.7e12 (2024+) and < 2e12 (~2033)
+    // 允许范围：2024-01-01 之后、2100-01-01 之前
+    // 下限 1.7e12 ≈ 2023-11、上限 4.1e12 ≈ 2100-01
     EXPECT_GT(now, 1700000000000ull);
-    EXPECT_GT(2000000000000ull, now);
+    EXPECT_GT(4100000000000ull, now);
 }
 
 TEST(NowMsTest, MonotonicIncrease) {

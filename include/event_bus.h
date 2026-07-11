@@ -104,6 +104,13 @@ public:
         }
     }
 
+    /// 【测试专用】清空所有订阅者。生产代码不应调用。
+    /// 用途：单元测试之间隔离全局静态处理器表，见 tests/pmpc_test_fixture.h。
+    static void Clear() {
+        std::lock_guard<std::mutex> lock(Mutex());
+        Handlers().clear();
+    }
+
 private:
     struct Entry {
         size_t id;
