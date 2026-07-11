@@ -136,3 +136,8 @@ add_pmpc_test(test_redundancy_role_transitions test_redundancy_role_transitions.
     ${CMAKE_SOURCE_DIR}/src/protocol.cxx
     ${CMAKE_SOURCE_DIR}/src/socket.cpp
 )
+
+# Bug #4: TCP socket 超时 vs 对端断连语义
+add_pmpc_test(test_socket_timeout test_socket_timeout.cxx
+    ${CMAKE_SOURCE_DIR}/src/socket.cpp
+)
