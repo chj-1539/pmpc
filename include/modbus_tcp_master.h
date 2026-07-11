@@ -241,6 +241,11 @@ public:
     /// 获取当前加载的配置（只读）
     const MasterConfig& GetConfig() const { return config_; }
 
+    // 测试挂钩：供 tests/test_modbus_master_write_race.cxx 访问私有
+    // WriteDOChanges/WriteAOChanges 与 doSent_/aoSent_，验证 bug #5 竞态修复。
+    // 生产代码不使用。见 CLAUDE.md「已知陷阱 / 修复历史」bug #5。
+    friend class ModbusTcpMasterTestAccess;
+
 private:
     // ── 配置解析 ──
     bool ParseGlobal(const std::string& key, const std::string& val);
