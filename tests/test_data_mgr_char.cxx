@@ -132,23 +132,26 @@ TEST_F(DataMgrCharTest, TODO_AoChangeQueueCapsAt10000AndDropsOldest) {
     EXPECT_EQ(mgr.PendingAoChangeCount(), static_cast<size_t>(10000));
 }
 
-// ─── L4 特征化 ─────────────────────────────────────────────────────
-// 重复的 [Channel_N] 节头：LoadConfig 里逻辑是把 devices 合并到已存在
-// 通道里（curChId 指向已存在的），但 reporter 会报 warning。
-// TODO(L4): 应该是显式 error 或合并成功但去重。这里锁定当前"合并"行为。
-TEST_F(DataMgrCharTest, TODO_DuplicateChannelSectionMergesSilently) {
-    // 两个 [Channel_1]，各带不同设备 —— 期望合并后通道 1 有 Dev1 和 Dev2
+// ─── L4 修复回归 ───────────────────────────────────────────────────
+// 重复的 [Channel_N] 节头：新行为是拒绝第二个及以后的同名节头，报 error，
+// 并跳过其后的 Dev_M 行，避免被误合并到第一个通道。
+TEST_F(DataMgrCharTest, DuplicateChannelSectionRejectsExtras) {
+    // 两个 [Channel_1]，各带不同设备 —— 期望只有第一个的 Dev_1 生效
     std::ofstream f(cfgPath_);
     f << "[Channel_1]\n" << "Dev_1=1,1,0,0\n";
-    f << "[Channel_1]\n" << "Dev_2=2,2,0,0\n";
+    f << "[Channel_1]\n" << "Dev_2=2,2,0,0\n";   // 应被拒绝：所在段被忽略
     f.close();
     RemoteDataMgr::Instance().LoadConfig(cfgPath_);
 
     auto& mgr = RemoteDataMgr::Instance();
     auto devIds = mgr.GetDeviceIds(1);
-    // 当前行为：两个设备都进了 channel 1
-    EXPECT_EQ(devIds.size(), static_cast<size_t>(2));
-    // TODO(L4): 应可能是 error，或至少产生更明显的诊断。
+    // 新行为：只有第一段的 Dev_1 生效
+    ASSERT_EQ(devIds.size(), static_cast<size_t>(1));
+    EXPECT_EQ(devIds[0], static_cast<uint16_t>(1));
+
+    // 通道总数也只有 1 个
+    auto chIds = mgr.GetChannelIds();
+    EXPECT_EQ(chIds.size(), static_cast<size_t>(1));
 }
 
 } // namespace

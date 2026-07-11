@@ -227,14 +227,20 @@ bool RemoteDataMgr::LoadConfig(const std::string& iniPath,
             }
 
             // 检查重复通道
+            // L4 修复：以前柔性追加（push_back 一个同 chId 的 Channel），
+            // 结果 channels_ 里有两条同 chId 的记录，FindCh 只返回第一条，
+            // 后续 push 的 Channel 变成"死"数据。加上重复调用 LoadConfig
+            // 就更混乱。改为拒绝第二个 [Channel_N]：报 error、清空
+            // curChId 让后续 Dev_M 行被跳过（不会被误加到第一个通道）。
             if (FindCh(curChId) != nullptr)
             {
                 if (reporter)
-                    reporter->Report(lineNum, "警告",
+                    reporter->Report(lineNum, "错误",
                         "通道 " + std::to_string(curChId)
-                        + " 重复定义，新定义将被追加");
-
-                // 即使重复也允许追加（柔性处理）
+                        + " 重复定义，已忽略第二次及后续 [Channel_"
+                        + std::to_string(curChId) + "] 段");
+                curChId = 0;   // 跳过后续 Dev_M 行
+                continue;
             }
 
             Channel newCh;
