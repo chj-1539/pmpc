@@ -241,6 +241,10 @@ void DebugConsole::ClientThread(socket clientSock)
         clientSock.set_recv_timeout(std::chrono::milliseconds(RECV_TIMEOUT_MS));
     } catch (...) {}
 
+    // H7 修复：每个客户端连接持有一个独立的 stateful IAC 过滤器，跨 recv
+    // 分包也能正确处理 telnet 协商序列。
+    pmpc::TelnetIacFilter iacFilter;
+
     // ── 密码认证 ──
     if (!password_.empty()) {
         SendLine(clientSock, "密码: ");
@@ -256,7 +260,7 @@ void DebugConsole::ClientThread(socket clientSock)
                 continue;
             }
             if (n == 0) return;
-            pwBuf.append(filter_telnet_iac(tmp, n));
+            pwBuf.append(iacFilter.Feed(tmp, n));   // H7
             size_t pos;
             while ((pos = pwBuf.find('\n')) != std::string::npos) {
                 std::string line = pwBuf.substr(0, pos);
@@ -303,8 +307,8 @@ void DebugConsole::ClientThread(socket clientSock)
             break;
         }
 
-        // 累积到缓冲区（过滤 telnet IAC 协商字节）
-        buf.append(filter_telnet_iac(tmp, n));
+        // 累积到缓冲区（过滤 telnet IAC 协商字节 —— stateful，见 H7）
+        buf.append(iacFilter.Feed(tmp, n));
 
         // 逐行处理
         size_t pos;

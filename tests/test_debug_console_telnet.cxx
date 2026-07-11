@@ -108,20 +108,97 @@ TEST(TelnetIacTest, SubnegotiationWithoutSeEnds) {
     EXPECT_STR_EQ(Filter(in).c_str(), "x");
 }
 
-// ---- H7：跨包分片是当前实现的已知缺陷（无状态）----
-// 若 IAC 序列被拆到两次 recv() 中，末尾裸 0xFF 会被丢，下一次 recv 从
-// 选项字节开始就成了普通字符。真正的修复需要让 filter_telnet_iac 成为
-// stateful 类（记住"上一个字节是 IAC"）。这条测试用 DISABLED_ 前缀，
-// 修好后去掉前缀就翻转为绿。
-TEST(TelnetIacTest, DISABLED_TrailingIacAtChunkBoundaryIsDeferred) {
-    // 场景：第一个 recv 收到 [IAC]，第二个 recv 收到 [DO, ECHO, 'x']。
-    // 无状态实现会把两次分别过滤成 "" + "\xFD\x01x"（第二个 recv 里
-    // 首字节被当作数据），期望应为 "x"。
+// ---- H7 已修复：跨包分片由 stateful TelnetIacFilter 处理 ----
+// 保留原用例的 stateful 版本（用 TelnetIacFilter 而非 free function），
+// 断言跨 recv 边界的 IAC 序列被正确处理。
+
+// stateful 版本 helper：喂两段 chunk，返回拼接后的过滤结果
+// 注：不能写 `f.Feed(a) + f.Feed(b)`，因 operator+ 的两侧求值顺序未指定
+// (C++17 仍未 sequenced)，g++ 实测会先跑第二个。
+std::string FeedTwoChunks(const std::vector<uint8_t>& a,
+                          const std::vector<uint8_t>& b) {
+    pmpc::TelnetIacFilter f;
+    std::string out;
+    out += f.Feed(a.data(), a.size());
+    out += f.Feed(b.data(), b.size());
+    return out;
+}
+
+TEST(TelnetIacStatefulTest, TrailingIacAtChunkBoundaryDeferred) {
+    // 场景：recv#1 收到 [IAC]，recv#2 收到 [DO, ECHO, 'x']。stateful 过滤
+    // 器应记住"上一字节是 IAC"，第二 recv 首字节作 cmd 处理。期望："x"
     std::vector<uint8_t> chunk1{IAC};
     std::vector<uint8_t> chunk2{DO_, OPT_ECHO, 'x'};
-    std::string out = Filter(chunk1) + Filter(chunk2);
-    EXPECT_STR_EQ(out.c_str(), "x");
-    // TODO(H7): 修好 stateful 后去掉 DISABLED_ 前缀。
+    EXPECT_STR_EQ(FeedTwoChunks(chunk1, chunk2).c_str(), "x");
+}
+
+TEST(TelnetIacStatefulTest, IacCmdOptionSplitAcrossThreeChunks) {
+    // IAC DO ECHO 恰好被切三段：[IAC] [DO] [ECHO,'y']
+    pmpc::TelnetIacFilter f;
+    std::vector<uint8_t> c1{IAC};
+    std::vector<uint8_t> c2{DO_};
+    std::vector<uint8_t> c3{OPT_ECHO, 'y'};
+    std::string out;
+    out += f.Feed(c1.data(), c1.size());
+    out += f.Feed(c2.data(), c2.size());
+    out += f.Feed(c3.data(), c3.size());
+    EXPECT_STR_EQ(out.c_str(), "y");
+}
+
+TEST(TelnetIacStatefulTest, SubnegotiationSplitAcrossChunks) {
+    // IAC SB TERM_TYPE 0 'x' 't' 'e' 'r' 'm' IAC SE 'r' 'u' 'n'
+    // 被切成 3 段：header / body / SE+data
+    pmpc::TelnetIacFilter f;
+    std::vector<uint8_t> c1{IAC, SB, OPT_TERM_TYPE};
+    std::vector<uint8_t> c2{0x00, 'x', 't', 'e', 'r', 'm'};
+    std::vector<uint8_t> c3{IAC, SE, 'r', 'u', 'n'};
+    std::string out;
+    out += f.Feed(c1.data(), c1.size());
+    out += f.Feed(c2.data(), c2.size());
+    out += f.Feed(c3.data(), c3.size());
+    EXPECT_STR_EQ(out.c_str(), "run");
+}
+
+TEST(TelnetIacStatefulTest, EscapedIacInDataSplitAcrossChunks) {
+    // 数据流里 0xFF 由 IAC IAC 转义。跨包切开：[IAC] [IAC, 'z']
+    pmpc::TelnetIacFilter f;
+    std::vector<uint8_t> c1{'a', IAC};
+    std::vector<uint8_t> c2{IAC, 'z'};
+    std::string out;
+    out += f.Feed(c1.data(), c1.size());
+    out += f.Feed(c2.data(), c2.size());
+    // 期望：'a' + 0xFF + 'z'
+    ASSERT_EQ(out.size(), static_cast<size_t>(3));
+    EXPECT_EQ(static_cast<uint8_t>(out[0]), 'a');
+    EXPECT_EQ(static_cast<uint8_t>(out[1]), 0xFF);
+    EXPECT_EQ(static_cast<uint8_t>(out[2]), 'z');
+}
+
+TEST(TelnetIacStatefulTest, HasPendingReflectsInternalState) {
+    pmpc::TelnetIacFilter f;
+    EXPECT_FALSE(f.HasPending());
+    std::vector<uint8_t> c1{IAC};
+    f.Feed(c1.data(), c1.size());
+    EXPECT_TRUE(f.HasPending());          // 等 cmd 字节
+    std::vector<uint8_t> c2{DO_};
+    f.Feed(c2.data(), c2.size());
+    EXPECT_TRUE(f.HasPending());          // 等 option 字节
+    std::vector<uint8_t> c3{OPT_ECHO};
+    f.Feed(c3.data(), c3.size());
+    EXPECT_FALSE(f.HasPending());          // 命令完成，回到 Normal
+}
+
+TEST(TelnetIacStatefulTest, ResetClearsInternalState) {
+    pmpc::TelnetIacFilter f;
+    std::vector<uint8_t> c1{IAC};
+    f.Feed(c1.data(), c1.size());
+    ASSERT_TRUE(f.HasPending());
+    f.Reset();
+    EXPECT_FALSE(f.HasPending());
+    // Reset 后收到普通字节应作为数据
+    std::vector<uint8_t> c2{'A'};
+    std::string out = f.Feed(c2.data(), c2.size());
+    EXPECT_STR_EQ(out.c_str(), "A");
 }
 
 } // namespace
