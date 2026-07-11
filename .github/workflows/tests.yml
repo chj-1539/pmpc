@@ -1,0 +1,86 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一 ref 上有新的推送就取消旧任务，节省 CI 分钟
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & run mini_gtest suite (Windows / MinGW g++)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # windows-latest (Windows Server 2022) 自带 MinGW-w64 g++（在
+      # C:\ProgramData\Chocolatey\bin 或 C:\msys64\mingw64\bin 下）。
+      # 若默认 PATH 找不到，就走 chocolatey 装一份。
+      - name: Ensure MinGW g++ is on PATH
+        run: |
+          $g = Get-Command g++ -ErrorAction SilentlyContinue
+          if (-not $g) {
+            Write-Host "g++ not found — installing mingw via choco"
+            choco install mingw -y --no-progress
+            # 刷新 PATH 到本 job 剩余步骤
+            $env:PATH = "C:\ProgramData\mingw64\mingw64\bin;$env:PATH"
+            echo "C:\ProgramData\mingw64\mingw64\bin" >> $env:GITHUB_PATH
+          }
+          g++ --version
+
+      - name: Build & run tests
+        run: .\build_tests.bat
+
+      # 用刚编好的 exe 各自跑一次并输出 JUnit XML 供 GitHub 侧渲染
+      # （build_tests.bat 也会跑一遍，重复跑一次代价可忽略；这一步就算失败
+      # 也继续，让 report-junit 步骤能把结果贴出来）
+      - name: Run tests again with JUnit output
+        if: always()
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Path junit -Force | Out-Null
+          $failed = 0
+          Get-ChildItem tests\test_*.exe | ForEach-Object {
+            $name = $_.BaseName
+            & $_.FullName --gtest_output="xml:junit\$name.xml"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::$name failed with exit code $LASTEXITCODE"
+              $failed++
+            }
+          }
+          if ($failed -gt 0) {
+            Write-Host "$failed test executable(s) failed"
+            exit 1
+          }
+
+      - name: Publish JUnit test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: mini_gtest results
+          path: junit/*.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: Upload test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-output
+          path: |
+            tests/*.exe
+            tests/*.log
+            tests/*.err
+            junit/*.xml
+          if-no-files-found: ignore
