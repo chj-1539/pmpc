@@ -172,14 +172,11 @@ void DebugConsole::Stop()
     running_ = false;
 
     // 停止所有自动变位任务
-    {
-        std::lock_guard<std::mutex> lock(autoMtx_);
-        for (auto& t : autoTasks_) {
-            t->stopFlag = true;
-            if (t->thr.joinable()) t->thr.join();
-        }
-        autoTasks_.clear();
-    }
+    // 修复 M8 死锁：先在锁内把所有 AutoTask 取出到局部 vector 并设置 stopFlag，
+    // 释放锁后再逐个 join。理由同 StopAutoTask。
+    auto stoppedTasks = DetachAllTasksLocked(autoMtx_, autoTasks_);
+    for (auto& t : stoppedTasks)
+        if (t->thr.joinable()) t->thr.join();
 
     for (auto& sock : listenSocks_)
         try { sock.close(); } catch (...) {}
@@ -743,12 +740,10 @@ void DebugConsole::CmdAutoStop(socket& sock, const std::vector<std::string>& arg
     if (args.size() < 3) { SendLine(sock, "用法: auto stop <id|all>"); return; }
 
     if (ToLower(args[2]) == "all") {
-        std::lock_guard<std::mutex> lock(autoMtx_);
-        for (auto& t : autoTasks_) {
-            t->stopFlag = true;
+        // 修复 M8 死锁：同 StopAutoTask，锁内取出、锁外 join。
+        auto stoppedTasks = DetachAllTasksLocked(autoMtx_, autoTasks_);
+        for (auto& t : stoppedTasks)
             if (t->thr.joinable()) t->thr.join();
-        }
-        autoTasks_.clear();
         SendLine(sock, "OK: 已停止全部自动变位任务");
         return;
     }
@@ -790,16 +785,15 @@ int DebugConsole::CreateAutoTask(AutoTask::Type type, uint16_t ch,
 
 bool DebugConsole::StopAutoTask(int id)
 {
-    std::lock_guard<std::mutex> lock(autoMtx_);
-    for (auto it = autoTasks_.begin(); it != autoTasks_.end(); ++it) {
-        if ((*it)->id == id) {
-            (*it)->stopFlag = true;
-            if ((*it)->thr.joinable()) (*it)->thr.join();
-            autoTasks_.erase(it);
-            return true;
-        }
-    }
-    return false;
+    // 修复 M8 死锁：以前是「先持 autoMtx_ → join()」，
+    // 但 AutoToggleThread/AutoSweepThread 每轮循环都要再抢 autoMtx_，
+    // → 工作线程等锁、Stop 线程等 join，必然死锁。
+    // 现在的做法：DetachTaskLocked 在锁内把 unique_ptr 取出、标记 stopFlag、
+    // 从 vector erase；锁外再 join。stopFlag 是 atomic 从锁外可安全读写。
+    auto victim = DetachTaskLocked(autoMtx_, autoTasks_, id);
+    if (!victim) return false;
+    if (victim->thr.joinable()) victim->thr.join();
+    return true;
 }
 
 void DebugConsole::AutoToggleThread(int /*taskId*/, uint16_t ch, uint16_t dev,

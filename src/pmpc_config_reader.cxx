@@ -297,6 +297,18 @@ bool RemoteDataMgr::LoadConfig(const std::string& iniPath,
             continue;
         }
 
+        // 上限校验：pointNo 是 uint16_t（最大 65535）。DI 需要额外预留 pt=1
+        // 作为通讯状态位，故业务 diCnt ≤ 65534；AI/DO/AO 上限为 65535。
+        // 见 CLAUDE.md 「已知陷阱」M13。
+        if (diCnt > 65534)
+        {
+            if (reporter)
+                reporter->Report(lineNum, "错误",
+                    "diCnt=" + std::to_string(diCnt)
+                    + " 超过上限 65534（pt=1 保留给通讯状态），该设备已跳过");
+            continue;
+        }
+
         // ---- 查找通道 ----
         // 注：这里不能用 curChId 直接索引，因为可能有多段相同 ID 的 channel
         Channel* pCh = FindCh(curChId);
@@ -327,10 +339,13 @@ bool RemoteDataMgr::LoadConfig(const std::string& iniPath,
         // DI
         // 点号 1 固定为通讯状态指示，业务遥信从点号 2 开始
         // 配置文件 diCnt 表示业务遥信数量，总计分配 diCnt+1 个点
-        for (uint16_t i = 1; i <= diCnt + 1; i++)
+        // 注意：diCnt 是 uint16_t，若为 65535，diCnt+1 在 uint16_t 语境下会
+        // 回绕到 0，循环一次不执行。这里显式提升到 uint32_t 计算总数。
+        const uint32_t diTotal = static_cast<uint32_t>(diCnt) + 1u;
+        for (uint32_t i = 1; i <= diTotal; i++)
         {
             DiPoint dp{};
-            dp.pointNo  = i;
+            dp.pointNo  = static_cast<uint16_t>(i);
             dp.value    = false;
             dp.lastVal  = false;
             dp.tsMs     = 0;
@@ -338,20 +353,20 @@ bool RemoteDataMgr::LoadConfig(const std::string& iniPath,
         }
 
         // AI
-        for (uint16_t i = 1; i <= aiCnt; i++)
+        for (uint32_t i = 1; i <= aiCnt; i++)
         {
             AiPoint ap{};
-            ap.pointNo = i;
+            ap.pointNo = static_cast<uint16_t>(i);
             ap.value   = 0.0;
             ap.lastVal = 0.0;
             newDev.aiList.push_back(ap);
         }
 
         // DO
-        for (uint16_t i = 1; i <= doCnt; i++)
+        for (uint32_t i = 1; i <= doCnt; i++)
         {
             DoPoint dp{};
-            dp.pointNo    = i;
+            dp.pointNo    = static_cast<uint16_t>(i);
             dp.masterVal  = false;
             dp.slaveVal   = false;
             dp.lastMaster = false;
@@ -360,10 +375,10 @@ bool RemoteDataMgr::LoadConfig(const std::string& iniPath,
         }
 
         // AO
-        for (uint16_t i = 1; i <= aoCnt; i++)
+        for (uint32_t i = 1; i <= aoCnt; i++)
         {
             AoPoint ap{};
-            ap.pointNo = i;
+            ap.pointNo = static_cast<uint16_t>(i);
             ap.value   = 0.0;
             ap.lastVal = 0.0;
             newDev.aoList.push_back(ap);

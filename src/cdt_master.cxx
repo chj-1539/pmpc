@@ -22,6 +22,9 @@ constexpr int      RECV_TIMEOUT  = 200;
 int CdtMaster::SafeStoi(const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } }
 double CdtMaster::SafeStod(const std::string& s, double def) { try { return std::stod(s); } catch (...) { return def; } }
 
+// 注：AdvanceSyncHeader 已在 cdt_master.h 内联定义（方便单元测试直连），
+// 见 test_cdt_master_parser.cxx。修复历史见 CLAUDE.md C2 条目。
+
 CdtMaster::CdtMaster() {}
 CdtMaster::~CdtMaster() { Stop(); }
 
@@ -136,14 +139,19 @@ void CdtMaster::PortThread(int chIdx) {
                 if (n == 0) continue;
             } catch (const std::exception&) { break; }
 
-            // Sync header detection            if (pos == 0 && byte != SYNC_BYTE) continue;
-            if (pos == 1 && byte != SYNC_BYTE2) { if (byte == SYNC_BYTE) { pos = 1; continue; } pos = 0; continue; }
-            if (pos == 2 && byte != SYNC_BYTE) { pos = 0; continue; }
-            if (pos == 3 && byte != SYNC_BYTE2) { if (byte == SYNC_BYTE) pos = 1; else pos = 0; continue; }
-            if (pos == 4 && byte != SYNC_BYTE) { pos = 0; continue; }
-            if (pos == 5 && byte != SYNC_BYTE2) { if (byte == SYNC_BYTE) pos = 1; else pos = 0; continue; }
+            // 同步头识别（CDT 帧头由 3 组 EB 90 重复组成，共 6 字节）。
+            // 详见 CdtMaster::AdvanceSyncHeader 纯函数（cdt_master.h）。
+            // 修复：以前这里第一行写成
+            //   `// Sync header detection            if (pos == 0 && byte != SYNC_BYTE) continue;`
+            // 把 `if (pos == 0)` 判断吞进了单行注释里，pos=0 时任意字节都会被写入 buf[0]，
+            // 后续解析全部错乱。见 code-review 记录中的 C2。
+            if (pos < 6) {
+                size_t next = AdvanceSyncHeader(pos, byte);
+                if (next <= pos) { pos = next; continue; }  // 未前进，不写入 buf
+                pos = next;
+            }
 
-            buf[pos++] = byte;
+            buf[pos - 1] = byte;
 
             // 同步头完成后，解析控制字获取长度
             if (pos == 8) {

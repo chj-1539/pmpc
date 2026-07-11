@@ -38,6 +38,56 @@ public:
     void Stop();
     bool IsRunning() const { return running_; }
 
+    // 测试挂钩：供 tests/test_debug_console_lifecycle.cxx 访问私有
+    // CreateAutoTask/StopAutoTask/autoTasks_，验证 M8 死锁修复。
+    // 生产代码不使用。见 CLAUDE.md「已知陷阱 / 修复历史」M8 条目。
+    friend class DebugConsoleTestAccess;
+
+    // ── M8 死锁修复的核心操作：抽出为静态模板供直接单元测试 ──
+    // 语义：在 vec 中查找 id 匹配的元素，将其标记 stopFlag 并从 vec 中
+    // 移出（**在锁内**），随后返回给调用方在**锁外**执行 join()。
+    //
+    // 关键：join() 必须锁外调用；否则工作线程等锁、Stop 线程等 join → 死锁。
+    // Element 需具备 ->id / ->stopFlag / ->thr 三个成员（AutoTask 满足）。
+    template <typename PtrT>
+    static PtrT DetachTaskLocked(std::mutex& mtx,
+                                 std::vector<PtrT>& vec,
+                                 int id) {
+        std::lock_guard<std::mutex> lock(mtx);
+        for (auto it = vec.begin(); it != vec.end(); ++it) {
+            if ((*it)->id == id) {
+                (*it)->stopFlag = true;
+                PtrT victim = std::move(*it);
+                vec.erase(it);
+                return victim;
+            }
+        }
+        return PtrT{};
+    }
+
+    // 同上，一次性把 vec 中所有元素标记 stopFlag 并 move 到返回值容器。
+    template <typename PtrT>
+    static std::vector<PtrT> DetachAllTasksLocked(std::mutex& mtx,
+                                                  std::vector<PtrT>& vec) {
+        std::lock_guard<std::mutex> lock(mtx);
+        for (auto& e : vec) e->stopFlag = true;
+        std::vector<PtrT> stopped = std::move(vec);
+        vec.clear();
+        return stopped;
+    }
+
+    // 自动变位任务结构 —— 原为 private，为了让 test_debug_console_lifecycle.cxx
+    // 能直接实例化 std::vector<unique_ptr<AutoTask>> 驱动死锁模拟，上移到
+    // public。运行时无其他影响。
+    struct AutoTask {
+        int id;
+        enum Type { DI_TOGGLE = 0, AI_SWEEP } type;
+        uint16_t ch, dev, pt;
+        int intervalMs;
+        std::atomic<bool> stopFlag{false};
+        std::thread thr;
+    };
+
 private:
     struct BindConfig {
         std::string allowedIP;
@@ -75,14 +125,7 @@ private:
     void CmdLog(socket& sock, const std::vector<std::string>& args);
 
     // ── 自动变位任务 ──
-    struct AutoTask {
-        int id;
-        enum Type { DI_TOGGLE = 0, AI_SWEEP } type;
-        uint16_t ch, dev, pt;
-        int intervalMs;
-        std::atomic<bool> stopFlag{false};
-        std::thread thr;
-    };
+    // AutoTask 结构现在定义在 public 部分（供测试 —— 见 M8 修复说明）。
     int CreateAutoTask(AutoTask::Type type, uint16_t ch, uint16_t dev,
                        uint16_t pt, int intervalMs);
     bool StopAutoTask(int id);

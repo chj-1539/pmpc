@@ -27,6 +27,7 @@
 #include <mutex>
 #include <typeindex>
 #include <memory>
+#include <algorithm>  // std::remove_if — 见 Unsubscribe
 
 /// 预定义的四遥事件类型（所有驱动/模块共享）
 struct DIChange {

@@ -87,3 +87,27 @@ add_pmpc_test(test_comm_io test_comm_io.cxx
     ${CMAKE_SOURCE_DIR}/src/socket.cpp
     ${CMAKE_SOURCE_DIR}/src/serial_port.cpp
 )
+
+# ─── Phase A: 代码审查回归测试 (bug 修复配套) ───────────────────────────────
+
+# C6: event_bus.h 独立编译测试
+add_pmpc_test(test_event_bus_isolated_include test_event_bus_isolated_include.cxx)
+
+# M13: config 读取器 uint16 溢出回归
+add_pmpc_test(test_config_reader_overflow test_config_reader_overflow.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_data_mgr.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_config_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/ini_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/soe_queue.cxx
+    ${CMAKE_SOURCE_DIR}/src/protocol.cxx
+)
+
+# C2: cdt_master 同步头状态机回归（AdvanceSyncHeader 已 inline，无 .cxx 依赖）
+add_pmpc_test(test_cdt_master_parser test_cdt_master_parser.cxx)
+
+# M8: debug_console 自动任务生命周期（死锁修复回归）
+# 只依赖 DebugConsole::DetachTaskLocked/DetachAllTasksLocked 两个 static 模板
+# (在 debug_console.h 里内联)。不需要链接 debug_console.cxx 本身。
+add_pmpc_test(test_debug_console_lifecycle test_debug_console_lifecycle.cxx
+    ${CMAKE_SOURCE_DIR}/src/socket.cpp
+)
