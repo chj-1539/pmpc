@@ -686,7 +686,27 @@ bool PempServer::do_upload_soe(socket& client)
         std::min(events.size(), size_t(65535)));
     auto frame = FrameBuilder::MakeSOEFrame(
         FunCode::UploadSOE, events.data(), count);
-    return send_all(client, frame);
+    // H1 修复：发送失败时把 events 回填到队列头，避免 SOE 静默丢失。
+    // send_all 抛 socket_error 也算失败；用 try 包起来。
+    bool sent = false;
+    try {
+        sent = send_all(client, frame);
+    } catch (const std::exception& e) {
+        std::cerr << "[PempServer] SOE 发送异常: " << e.what() << std::endl;
+        sent = false;
+    }
+    if (!sent) {
+        std::cerr << "[PempServer] SOE 上传失败，已回填 " << events.size()
+                  << " 条到队列" << std::endl;
+        g_soeQueue.PushFrontBatch(events);
+        return false;
+    }
+    // 若发送成功但因 count 上限只包了前 65535 条，剩余的也应回填以便下次继续
+    if (events.size() > 65535) {
+        std::vector<SOEEvent> tail(events.begin() + 65535, events.end());
+        g_soeQueue.PushFrontBatch(tail);
+    }
+    return true;
 }
 
 // ==================== 发送 / 接收辅助 ====================

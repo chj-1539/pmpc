@@ -19,6 +19,11 @@ public:
     /// 添加一条 SOE 事件
     void Push(const SOEEvent& ev);
 
+    /// 把一批事件回填到队列头部，保持它们相互的原有顺序。
+    /// 用途：发送失败时 requeue，让 SOE 顺序不被破坏；见 pemp_server::do_upload_soe。
+    /// 若队列后续又累积了新事件，这批老事件仍排在最前，下次上传优先处理。
+    void PushFrontBatch(const std::vector<SOEEvent>& events);
+
     /// 取走所有待上传的 SOE（清空待上传队列，返回拷贝）
     /// 用于 52H 主动上传后清空
     std::vector<SOEEvent> PopAll();

@@ -12,6 +12,15 @@ void SOEQueue::Push(const SOEEvent& ev)
     events_.push_back(ev);
 }
 
+void SOEQueue::PushFrontBatch(const std::vector<SOEEvent>& events)
+{
+    if (events.empty()) return;
+    std::lock_guard<std::mutex> lock(mtx_);
+    // 使用倒序 emplace_front 保持传入 vector 原有顺序在 deque 前部
+    for (auto it = events.rbegin(); it != events.rend(); ++it)
+        events_.push_front(*it);
+}
+
 std::vector<SOEEvent> SOEQueue::PopAll()
 {
     std::lock_guard<std::mutex> lock(mtx_);
