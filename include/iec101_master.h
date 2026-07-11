@@ -68,13 +68,18 @@ public:
     Iec101Master(); ~Iec101Master();
     bool LoadConfig(const std::string& path); bool Start(); void Stop();
     bool IsRunning() const { return running_; }
+
+    // 测试挂钩：允许 tests/test_iec101_master_multichannel.cxx 触及
+    // config_ 与 HandleGIResponse，验证 M11 修复。
+    friend class Iec101MasterTestAccess;
+
 private:
     void ChannelThread(int chIdx);
     void PollDevice(CommIO& io, const Iec101DeviceConfig& dev, int chIdx, int devIdx, int timeoutMs);
     bool SendRecvVarFrame(CommIO& io, const uint8_t* asdu, size_t asduLen, uint16_t linkAddr,
                           uint8_t* respAsdu, size_t& respLen, int timeoutMs);
     bool SendRecvFixedFrame(CommIO& io, uint8_t cmd, uint16_t linkAddr, int timeoutMs);
-    void HandleGIResponse(const uint8_t* asdu, size_t len, uint16_t coa);
+    void HandleGIResponse(const uint8_t* asdu, size_t len, uint16_t coa, int chIdx);
     void HandleSpontaneous(const uint8_t* asdu, size_t len, uint16_t coa);
 
     static uint8_t CalcCS(const uint8_t* data, size_t len);

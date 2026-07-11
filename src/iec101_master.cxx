@@ -177,25 +177,30 @@ static uint32_t ReadIOA(const uint8_t* data) {
     return (uint32_t)((uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16));
 }
 
-void Iec101Master::HandleGIResponse(const uint8_t* asdu, size_t len, uint16_t coa) {
+void Iec101Master::HandleGIResponse(const uint8_t* asdu, size_t len, uint16_t coa, int chIdx) {
     if (len < 6) return;
+    if (chIdx < 0 || chIdx >= (int)config_.channels.size()) return;
     auto& mgr = RemoteDataMgr::Instance();
     uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    // simplified: match DI by IOA
-    for (auto& ch : config_.channels)
-        for (auto& dev : ch.devices)
-            if (dev.coa == coa)
-                for (auto& di : dev.diList) {
-                    // find IOA at offset 6
-                    for (size_t i = 6; i + 4 <= len; i += 4) {
-                        uint32_t ioa = ReadIOA(asdu + i);
-                        if (ioa == di.ioa) {
-                            bool val = (asdu[i+3] & 0x01) != 0;
-                            mgr.SetDi(1, dev.coa, di.point, val, now, true);
-                        }
-                    }
+    // M11 修复：以前遍历所有 channels_ 并硬编码 SetDi(1, ...)，导致
+    // (a) 匹配任意通道下同 coa 的设备（跨通道错配）
+    // (b) 所有采集数据都记到 chId=1 下（多通道时相互覆盖）
+    // 现在只处理当前通道，chId 用 (chIdx + 1)（1-based, 与 config 顺序对齐）。
+    uint16_t chId = static_cast<uint16_t>(chIdx + 1);
+    auto& ch = config_.channels[chIdx];
+    for (auto& dev : ch.devices) {
+        if (dev.coa != coa) continue;
+        for (auto& di : dev.diList) {
+            for (size_t i = 6; i + 4 <= len; i += 4) {
+                uint32_t ioa = ReadIOA(asdu + i);
+                if (ioa == di.ioa) {
+                    bool val = (asdu[i+3] & 0x01) != 0;
+                    mgr.SetDi(chId, dev.coa, di.point, val, now, true);
                 }
+            }
+        }
+    }
 }
 
 void Iec101Master::PollDevice(CommIO& io, const Iec101DeviceConfig& dev, int chIdx, int /*devIdx*/, int timeoutMs) {
@@ -208,7 +213,7 @@ void Iec101Master::PollDevice(CommIO& io, const Iec101DeviceConfig& dev, int chI
         0x00, 0x00, 0x00, 0x14
     };
     if (SendRecvVarFrame(io, giAsdu, sizeof(giAsdu), dev.linkAddr, respAsdu, respLen, timeoutMs)) {
-        HandleGIResponse(respAsdu, respLen, dev.coa);
+        HandleGIResponse(respAsdu, respLen, dev.coa, chIdx);
     }
 
     // Request class 1 data

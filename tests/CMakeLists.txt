@@ -229,3 +229,20 @@ add_pmpc_test(test_data_mgr_char test_data_mgr_char.cxx
 
 # H5: iec104_slave 遥控 fallback 修复回归（DecideRemoteControlTargets 已 inline）
 add_pmpc_test(test_iec104_slave_remote_ctrl test_iec104_slave_remote_ctrl.cxx)
+
+# M11: iec101_master 硬编码 channel=1 修复回归
+add_pmpc_test(test_iec101_master_multichannel test_iec101_master_multichannel.cxx
+    ${CMAKE_SOURCE_DIR}/src/iec101_master.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_data_mgr.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_config_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/ini_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/soe_queue.cxx
+    ${CMAKE_SOURCE_DIR}/src/protocol.cxx
+    ${CMAKE_SOURCE_DIR}/src/packet_logger.cxx
+    ${CMAKE_SOURCE_DIR}/src/module_manager.cxx
+    ${CMAKE_SOURCE_DIR}/src/modbus_tcp_master.cxx
+    ${CMAKE_SOURCE_DIR}/src/pemp_server.cxx
+    ${CMAKE_SOURCE_DIR}/src/redundancy.cxx
+    ${CMAKE_SOURCE_DIR}/src/socket.cpp
+    ${CMAKE_SOURCE_DIR}/src/serial_port.cpp
+)
