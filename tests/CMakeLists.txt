@@ -227,6 +227,9 @@ add_pmpc_test(test_data_mgr_char test_data_mgr_char.cxx
     ${CMAKE_SOURCE_DIR}/src/protocol.cxx
 )
 
+# M4: iec104_slave client 线程 cleanup 修复回归（helper 已 inline）
+add_pmpc_test(test_iec104_slave_thread_cleanup test_iec104_slave_thread_cleanup.cxx)
+
 # H5: iec104_slave 遥控 fallback 修复回归（DecideRemoteControlTargets 已 inline）
 add_pmpc_test(test_iec104_slave_remote_ctrl test_iec104_slave_remote_ctrl.cxx)
 

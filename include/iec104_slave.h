@@ -138,6 +138,24 @@ public:
     DecideRemoteControlTargets(const std::vector<SlaveDOMapping>& mapping,
                                int cmdVal);
 
+    // M4 修复：Iec104Slave 内部用来跟踪 client 线程；测试也需要直接构造。
+    // 每个 entry 携带一个 shared_ptr<atomic<bool>> done 标志，工作线程
+    // return 前置位；CleanupFinishedClientThreads 基于该标志回收已结束线程。
+    struct ClientThreadEntry {
+        std::thread                thr;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+    static inline size_t CleanupFinishedClientThreads(std::vector<ClientThreadEntry>& threads) {
+        size_t removed = 0;
+        for (auto it = threads.begin(); it != threads.end(); ) {
+            if (!it->done || !it->done->load()) { ++it; continue; }
+            if (it->thr.joinable()) it->thr.join();
+            it = threads.erase(it);
+            ++removed;
+        }
+        return removed;
+    }
+
 private:
     struct SlaveBind {
         std::string allowedIP;
@@ -191,8 +209,8 @@ private:
     std::vector<socket> listenSocks_;
     std::vector<std::thread> acceptThreads_;
 
-    // 客户端线程跟踪
-    std::vector<std::thread> clientThreads_;
+    // 客户端线程跟踪（结构与 helper 定义在 public 部分，见上）
+    std::vector<ClientThreadEntry> clientThreads_;
     std::mutex clientMtx_;
 
     // EventBus 订阅令牌

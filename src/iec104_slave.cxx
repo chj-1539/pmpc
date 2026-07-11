@@ -265,8 +265,8 @@ void Iec104Slave::Stop() {
     }
     {
         std::lock_guard<std::mutex> lock(clientMtx_);
-        for (auto& t : clientThreads_)
-            if (t.joinable()) t.join();
+        for (auto& e : clientThreads_)
+            if (e.thr.joinable()) e.thr.join();
         clientThreads_.clear();
     }
 
@@ -293,18 +293,26 @@ void Iec104Slave::AcceptLoop(const SlaveBind& bind, socket& listenSock) {
             }
 
             // Start client thread; the thread owns the socket
-            std::lock_guard<std::mutex> lock(clientMtx_);
-            clientThreads_.emplace_back(&Iec104Slave::ClientThread, this, std::move(client));
+            // M4 修复：每个 client thread 关联一个 done 标志，线程 return
+            // 前置位，让下面的 cleanup 循环能真正 erase 已结束线程。
+            auto done = std::make_shared<std::atomic<bool>>(false);
+            {
+                std::lock_guard<std::mutex> lock(clientMtx_);
+                ClientThreadEntry entry;
+                entry.done = done;
+                entry.thr = std::thread([this, s = std::move(client), done]() mutable {
+                    ClientThread(std::move(s));
+                    done->store(true);
+                });
+                clientThreads_.push_back(std::move(entry));
+            }
 
             // Periodically clean up finished client threads
             cleanupCounter++;
             if (cleanupCounter >= 10) {
                 cleanupCounter = 0;
                 std::lock_guard<std::mutex> lock2(clientMtx_);
-                for (auto it = clientThreads_.begin(); it != clientThreads_.end(); ) {
-                    if (it->joinable()) { ++it; continue; }
-                    it = clientThreads_.erase(it);
-                }
+                CleanupFinishedClientThreads(clientThreads_);
             }
         } catch (const socket_error&) {
             if (running_) break;
