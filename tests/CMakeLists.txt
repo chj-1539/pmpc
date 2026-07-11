@@ -246,3 +246,20 @@ add_pmpc_test(test_iec101_master_multichannel test_iec101_master_multichannel.cx
     ${CMAKE_SOURCE_DIR}/src/socket.cpp
     ${CMAKE_SOURCE_DIR}/src/serial_port.cpp
 )
+
+# M12: iec104 RecvFrame 无效 apduLen 关闭 socket
+add_pmpc_test(test_iec104_recvframe test_iec104_recvframe.cxx
+    ${CMAKE_SOURCE_DIR}/src/iec104_master.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_data_mgr.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_config_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/ini_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/soe_queue.cxx
+    ${CMAKE_SOURCE_DIR}/src/protocol.cxx
+    ${CMAKE_SOURCE_DIR}/src/packet_logger.cxx
+    ${CMAKE_SOURCE_DIR}/src/module_manager.cxx
+    ${CMAKE_SOURCE_DIR}/src/modbus_tcp_master.cxx
+    ${CMAKE_SOURCE_DIR}/src/pemp_server.cxx
+    ${CMAKE_SOURCE_DIR}/src/redundancy.cxx
+    ${CMAKE_SOURCE_DIR}/src/socket.cpp
+    ${CMAKE_SOURCE_DIR}/src/serial_port.cpp
+)

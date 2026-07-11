@@ -198,6 +198,9 @@ public:
     Iec104Master();
     ~Iec104Master();
 
+    // 测试挂钩：给 tests/test_iec104_recvframe.cxx 访问 RecvFrame 私有方法
+    friend class Iec104MasterTestAccess;
+
     bool LoadConfig(const std::string& path);
     bool Start();
     void Stop();

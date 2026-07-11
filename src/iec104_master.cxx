@@ -93,7 +93,14 @@ bool Iec104Master::RecvFrame(socket& sock, int timeoutMs, uint8_t* buf, size_t& 
     if (buf[0] != FRAME_START) return false;
     if (sock.recv(buf + 1, 1) != 1) return false;
     uint8_t apduLen = buf[1];
-    if (apduLen < 4 || apduLen > 253) return false;
+    if (apduLen < 4 || apduLen > 253) {
+        // M12 修复：apduLen 无效意味着帧同步已丢失。任何"继续读 N 字节
+        // 排空"都是猜测，只会把噪声当帧内容。安全的做法是关闭 socket，
+        // 让上层重连重新握手。见 CLAUDE.md「已知陷阱 / 修复历史」M12。
+        try { sock.shutdown(2); } catch (...) {}
+        try { sock.close();   } catch (...) {}
+        return false;
+    }
     size_t total = 0;
     while (total < apduLen) { size_t n = sock.recv(buf + 2 + total, apduLen - total); if (n == 0) return false; total += n; }
     len = 2 + apduLen;
