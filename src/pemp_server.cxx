@@ -12,7 +12,16 @@
 #include "soe_queue.h"
 #include <iostream>
 #include <cstring>
+#include <climits>
 #include <algorithm>
+#include <mutex>
+#include <set>
+
+// 前置声明：这些 static helper 定义在文件下半部（与 do_upload_di/ai 语义
+// 相关），但 handle_call_telemetry / do_upload_ai 都会用。
+static bool    CheckPempIds8Bit(uint16_t chId, uint16_t devNo);
+static int32_t QuantizeAiToInt32Warn(uint16_t chId, uint16_t devNo,
+                                     uint16_t pt, double v);
 
 // ─── 常量 ──────────────────────────────────────────────────────────────────
 static constexpr auto RECV_TIMEOUT  = std::chrono::milliseconds(500);
@@ -398,7 +407,8 @@ void PempServer::handle_call_telemetry(const std::vector<uint8_t>& frame,
     size_t count = aiList.size();
     std::vector<int32_t> values(count);
     for (size_t i = 0; i < count; i++)
-        values[i] = static_cast<int32_t>(aiList[i].value);
+        values[i] = QuantizeAiToInt32Warn(ch, dev, aiList[i].pointNo,
+                                          aiList[i].value);   // H3
 
     auto resp = FrameBuilder::MakeTelemetryFrame(
         FunCode::CallTelemetry, ch, dev, values.data(),
@@ -593,6 +603,45 @@ static bool CheckPempIds8Bit(uint16_t chId, uint16_t devNo)
     return true;
 }
 
+// H3 修复：PEMP 遥测帧 (53H / 03H) 的每个 AI 值是 int32。RemoteDataMgr
+// 里 AI 存 double，直接 static_cast<int32_t>(v) 会：
+//   1) 静默截去 fractional part（例：3.14 → 3）
+//   2) 对 |v| > 2^31 - 1 undefined behavior，MSVC/g++ 上表现为回绕
+// 修复策略：仍按规约用 int32 编码，但对每个"有损"点位 log 一次警告，让
+// 运维知道需要在模板里加 scale/offset 或换协议。此 helper 也做 clamp 到
+// int32 边界避免 UB。
+// 见 CLAUDE.md「已知陷阱 / 修复历史」H3 (code review)。
+static int32_t QuantizeAiToInt32Warn(uint16_t chId, uint16_t devNo,
+                                     uint16_t pt, double v)
+{
+    // 一次性警告，每个 (ch,dev,pt) 组合只警告一次；避免高频轮询刷屏
+    static std::mutex warnedMtx;
+    static std::set<uint64_t> warned;
+
+    auto emitOnce = [&](const char* reason) {
+        uint64_t key = (static_cast<uint64_t>(chId) << 32) |
+                       (static_cast<uint32_t>(devNo) << 16) |
+                       pt;
+        std::lock_guard<std::mutex> lk(warnedMtx);
+        if (warned.insert(key).second) {
+            std::cerr << "[PempServer] AI 上传精度警告 ch=" << chId
+                      << " dev=" << devNo << " pt=" << pt
+                      << " value=" << v << ": " << reason
+                      << "（考虑在模板里 scale/offset 归一到 int32 范围）"
+                      << std::endl;
+        }
+    };
+
+    const double kInt32Max = 2147483647.0;   // 2^31 - 1
+    const double kInt32Min = -2147483648.0;  // -2^31
+    if (v > kInt32Max) { emitOnce("超出 int32 上限，已 clamp"); return INT32_MAX; }
+    if (v < kInt32Min) { emitOnce("超出 int32 下限，已 clamp"); return INT32_MIN; }
+    // 检查是否有 fractional part
+    if (v != static_cast<double>(static_cast<int64_t>(v)))
+        emitOnce("有小数部分被截断");
+    return static_cast<int32_t>(v);
+}
+
 bool PempServer::do_upload_di(socket& client)
 {
     auto& mgr = RemoteDataMgr::Instance();
@@ -659,7 +708,8 @@ bool PempServer::do_upload_ai(socket& client)
             size_t count = aiList.size();
             std::vector<int32_t> values(count);
             for (size_t i = 0; i < count; i++)
-                values[i] = static_cast<int32_t>(aiList[i].value);
+                values[i] = QuantizeAiToInt32Warn(chId, devNo, aiList[i].pointNo,
+                                                  aiList[i].value);   // H3
 
             auto frame = FrameBuilder::MakeTelemetryFrame(
                 FunCode::UploadTelemetry,

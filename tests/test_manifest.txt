@@ -35,6 +35,7 @@ test_module_manager_hotreload   | test_module_manager_hotreload.cxx   | src/modu
 test_pemp_server_auth           | test_pemp_server_auth.cxx           | src/pemp_server.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/socket.cpp
 test_pemp_server_id_range       | test_pemp_server_id_range.cxx       | src/pemp_server.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/socket.cpp
 test_pemp_server_soe_upload     | test_pemp_server_soe_upload.cxx     | src/pemp_server.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/socket.cpp
+test_pemp_server_ai_precision   | test_pemp_server_ai_precision.cxx   | src/pemp_server.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/socket.cpp
 #
 # === Phase 3: 协议主站测试 (待添加) ===
 #

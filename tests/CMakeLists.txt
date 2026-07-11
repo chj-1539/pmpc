@@ -206,3 +206,14 @@ add_pmpc_test(test_pemp_server_soe_upload test_pemp_server_soe_upload.cxx
     ${CMAKE_SOURCE_DIR}/src/protocol.cxx
     ${CMAKE_SOURCE_DIR}/src/socket.cpp
 )
+
+# H3: PempServer AI double→int32 精度保护
+add_pmpc_test(test_pemp_server_ai_precision test_pemp_server_ai_precision.cxx
+    ${CMAKE_SOURCE_DIR}/src/pemp_server.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_data_mgr.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_config_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/ini_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/soe_queue.cxx
+    ${CMAKE_SOURCE_DIR}/src/protocol.cxx
+    ${CMAKE_SOURCE_DIR}/src/socket.cpp
+)
