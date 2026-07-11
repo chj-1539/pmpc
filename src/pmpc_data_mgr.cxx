@@ -90,6 +90,16 @@ void RemoteDataMgr::ClearAll()
     // 由 LoadConfig 调用，调用者已持有 structMtx_ 锁。
     // 各设备 devMtx 此时无竞争（子线程尚未启动），无需额外加锁。
     channels_.clear();
+    // 顺手清 pulse / ao 变化队列，保证测试之间隔离干净（生产语义无害：
+    // LoadConfig 意味着"配置换了"，任何未消费的历史队列都应作废）。
+    {
+        std::lock_guard<std::mutex> lock(pulseMtx_);
+        pulseQueue_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(aoQueueMtx_);
+        aoChangeQueue_.clear();
+    }
 }
 
 // ==================== 遍历查询（供 TCP Server 等模块使用） ====================

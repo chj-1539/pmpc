@@ -169,6 +169,14 @@ public:
     /// DO 脉冲宽度（毫秒），0→1 后自动复位为 0
     void SetDoPulseMs(uint64_t ms) { doPulseMs_ = ms; }
 
+    // ---- 测试挂钩 ----
+    /// aoChangeQueue_ 待发数量。原设计供冗余同步通道消费；目前无消费者
+    /// (code review H11)，仅测试断言使用。
+    size_t PendingAoChangeCount() const {
+        std::lock_guard<std::mutex> lock(aoQueueMtx_);
+        return aoChangeQueue_.size();
+    }
+
 private:
     RemoteDataMgr() = default;
     std::vector<Channel> channels_;

@@ -217,3 +217,12 @@ add_pmpc_test(test_pemp_server_ai_precision test_pemp_server_ai_precision.cxx
     ${CMAKE_SOURCE_DIR}/src/protocol.cxx
     ${CMAKE_SOURCE_DIR}/src/socket.cpp
 )
+
+# Phase B 特征化：C3/H11/L4 锁定当前行为
+add_pmpc_test(test_data_mgr_char test_data_mgr_char.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_data_mgr.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_config_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/ini_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/soe_queue.cxx
+    ${CMAKE_SOURCE_DIR}/src/protocol.cxx
+)
