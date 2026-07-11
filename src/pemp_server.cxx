@@ -447,7 +447,32 @@ void PempServer::handle_exec_remote_ctrl(const std::vector<uint8_t>& frame,
     uint16_t pt      = FrameParser::ReadU16(frame, 2);
     uint8_t  pwdLen  = FrameParser::ReadByte(frame, 4);
 
-    (void)pwdLen;
+    // 密码校验（M3 修复）。若 PempServer 未配置密码则跳过（保持老行为）；
+    // 否则要求帧内 pwdLen 与 rcPassword_ 长度一致且字节逐个匹配。
+    // 帧内密码从 offset 5 开始；dataLen 必须够容纳这些字节。
+    if (!rcPassword_.empty()) {
+        bool pwdOk = false;
+        if (pwdLen == rcPassword_.size() &&
+            static_cast<size_t>(dataLen) >= 5u + static_cast<size_t>(pwdLen)) {
+            pwdOk = true;
+            for (size_t i = 0; i < pwdLen; i++) {
+                if (FrameParser::ReadByte(frame, 5 + i) !=
+                    static_cast<uint8_t>(rcPassword_[i])) { pwdOk = false; break; }
+            }
+        }
+        if (!pwdOk) {
+            FrameBuilder fb;
+            fb.Begin(FunCode::ExecRemoteCtrl);
+            fb.Append(ch);
+            fb.Append(dev);
+            fb.AppendU16(pt);
+            fb.Append(static_cast<uint8_t>(CtrlResult::Failed));
+            auto resp = fb.End();
+            send_all(client, resp);
+            return;
+        }
+    }
+    (void)pwdLen;  // 密码未配置时保留老行为
 
     uint16_t doPt = pt;
     auto& mgr = RemoteDataMgr::Instance();

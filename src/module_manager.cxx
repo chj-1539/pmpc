@@ -84,6 +84,7 @@ struct PempServerModule::Impl {
     int diUploadMs = 5000;
     int aiUploadMs = 5000;
     std::vector<PempBind> binds;
+    std::string rcPassword;    ///< 遥控密码（M3 修复），空 = 不校验
     bool running = false;
     ~Impl() { delete server; }
 };
@@ -101,6 +102,7 @@ bool PempServerModule::LoadConfig(const std::string& cfgPath) {
     impl_->port = ini.GetInt("global", "port", 4096);
     impl_->diUploadMs = ini.GetInt("global", "di_upload_ms", 5000);
     impl_->aiUploadMs = ini.GetInt("global", "ai_upload_ms", 5000);
+    impl_->rcPassword = ini.Get("global", "rc_password", "");
     // 解析 [listen_N]
     impl_->binds.clear();
     for (auto& sec : ini.Sections()) {
@@ -130,6 +132,7 @@ bool PempServerModule::Start() {
                                     impl_->diUploadMs, impl_->aiUploadMs);
     if (!impl_->binds.empty())
         impl_->server->setBinds(impl_->binds);
+    impl_->server->setRemoteCtrlPassword(impl_->rcPassword);
     impl_->running = impl_->server->start();
     return impl_->running;
 }

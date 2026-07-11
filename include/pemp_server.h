@@ -34,9 +34,20 @@ public:
     ~PempServer();
 
     void setBinds(const std::vector<PempBind>& binds) { binds_ = binds; }
+
+    // 设置遥控密码。空字符串表示不校验（老行为，保持兼容）。
+    // 非空时，客户端 06H 帧中携带的密码 bytes 必须逐字节匹配。
+    // 见 CLAUDE.md「已知陷阱 / 修复历史」M3。
+    void setRemoteCtrlPassword(const std::string& pw) { rcPassword_ = pw; }
+    const std::string& remoteCtrlPassword() const { return rcPassword_; }
+
     bool start();
     void stop();
     bool is_running() const { return running_; }
+
+    // 测试挂钩：供 tests/test_pemp_server_auth.cxx 直接驱动
+    // handle_exec_remote_ctrl 而不必开完整 accept 循环。
+    friend class PempServerTestAccess;
 
 private:
     void accept_loop(const PempBind& bind, socket& listen_sock);
@@ -74,6 +85,7 @@ private:
     int diUploadMs_;
     int aiUploadMs_;
     std::vector<PempBind> binds_;
+    std::string rcPassword_;   ///< 遥控密码；空 = 不校验（M3 修复）
     std::atomic<bool> running_{true};
     std::vector<socket> listenSocks_;
     std::vector<std::thread> acceptThreads_;

@@ -32,6 +32,7 @@ test_redundancy_role_transitions| test_redundancy_role_transitions.cxx| src/redu
 test_socket_timeout             | test_socket_timeout.cxx             | src/socket.cpp
 test_modbus_master_write_race   | test_modbus_master_write_race.cxx   | src/modbus_tcp_master.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/packet_logger.cxx src/module_manager.cxx src/pemp_server.cxx src/redundancy.cxx src/socket.cpp src/serial_port.cpp
 test_module_manager_hotreload   | test_module_manager_hotreload.cxx   | src/module_manager.cxx src/modbus_tcp_master.cxx src/pemp_server.cxx src/redundancy.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/packet_logger.cxx src/socket.cpp src/serial_port.cpp
+test_pemp_server_auth           | test_pemp_server_auth.cxx           | src/pemp_server.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/socket.cpp
 #
 # === Phase 3: 协议主站测试 (待添加) ===
 #

@@ -173,3 +173,14 @@ add_pmpc_test(test_module_manager_hotreload test_module_manager_hotreload.cxx
     ${CMAKE_SOURCE_DIR}/src/socket.cpp
     ${CMAKE_SOURCE_DIR}/src/serial_port.cpp
 )
+
+# M3: PempServer 遥控密码校验修复回归
+add_pmpc_test(test_pemp_server_auth test_pemp_server_auth.cxx
+    ${CMAKE_SOURCE_DIR}/src/pemp_server.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_data_mgr.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_config_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/ini_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/soe_queue.cxx
+    ${CMAKE_SOURCE_DIR}/src/protocol.cxx
+    ${CMAKE_SOURCE_DIR}/src/socket.cpp
+)
