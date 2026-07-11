@@ -122,6 +122,22 @@ public:
     void Stop();
     bool IsRunning() const { return running_; }
 
+    // C_SC_NA_1 遥控决策纯函数（H5 修复）。给定某个 IOA 上的 DO mapping
+    // 列表和帧内 cmdVal，返回**应该**触发 SetDoMaster 的 (ch, dev, point)
+    // 列表。若无匹配则返回空 vector —— 修复前老代码会 fallback 到
+    // doMap[0]，把不匹配的请求当"随便找一个"来执行，属于安全隐患。
+    //
+    // 返回空表示 negative acknowledgment（COT.P/N=1），调用方不应写 DO。
+    // 每个匹配 entry 的 doVal = (cmdVal != 0)。
+    struct RemoteControlTarget {
+        uint16_t ch = 0, dev = 0, point = 0;
+        bool     doVal = false;
+    };
+    // inline 定义（见类外）避免测试文件链入 iec104_slave.cxx 的一整棵传递依赖图。
+    static std::vector<RemoteControlTarget>
+    DecideRemoteControlTargets(const std::vector<SlaveDOMapping>& mapping,
+                               int cmdVal);
+
 private:
     struct SlaveBind {
         std::string allowedIP;
@@ -196,6 +212,26 @@ private:
     std::vector<ClientInfo> clients_;
     std::mutex clientsMtx_;
 };
+
+// H5：inline 定义在类外，测试文件仅 include 头文件即可直接调用
+inline std::vector<Iec104Slave::RemoteControlTarget>
+Iec104Slave::DecideRemoteControlTargets(const std::vector<SlaveDOMapping>& mapping,
+                                        int cmdVal)
+{
+    std::vector<RemoteControlTarget> targets;
+    const bool doVal = (cmdVal != 0);
+    for (const auto& m : mapping) {
+        if (m.val == cmdVal) {
+            RemoteControlTarget t;
+            t.ch    = m.ch;
+            t.dev   = m.dev;
+            t.point = m.point;
+            t.doVal = doVal;
+            targets.push_back(t);
+        }
+    }
+    return targets;
+}
 
 // ==================== AppModule 包装 ====================
 

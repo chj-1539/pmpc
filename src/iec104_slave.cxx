@@ -13,6 +13,9 @@
 #include "str_util.h"
 #include <iostream>
 #include <sstream>
+
+// 注：DecideRemoteControlTargets 已在 iec104_slave.h 里 inline 定义
+// （方便测试直接链接不拖依赖图）。见 tests/test_iec104_slave_remote_ctrl.cxx。
 #include <cstring>
 #include <algorithm>
 #include <cmath>
@@ -509,31 +512,33 @@ bool Iec104Slave::HandleFrame(socket& sock, const uint8_t* buf, size_t len,
         int cmdVal = (asduLen > 9) ? (asdu[9] & 0x01) : 0;
 
         auto it = currentDev->doMap.find(ioA);
+        bool executed = false;
         if (it != currentDev->doMap.end()) {
-            bool executed = false;
-            for (auto& doEntry : it->second) {
-                if (doEntry.val == cmdVal) {
-                    RemoteDataMgr::Instance().SetDoMaster(doEntry.ch, doEntry.dev, doEntry.point, cmdVal != 0);
-                    executed = true;
-                    if (config_.verbose >= 1)
-                        std::cout << "[Iec104Slave] Remote control: IOA=" << ioA << " val=" << cmdVal
-                                 << " DO(" << doEntry.ch << "," << doEntry.dev
-                                 << "," << doEntry.point << ")" << std::endl;
-                }
-            }
-            if (!executed) {
-                // val mismatch, still process first entry
-                auto& first = it->second[0];
-                RemoteDataMgr::Instance().SetDoMaster(first.ch, first.dev, first.point, cmdVal != 0);
+            auto targets = DecideRemoteControlTargets(it->second, cmdVal);
+            for (auto& t : targets) {
+                RemoteDataMgr::Instance().SetDoMaster(t.ch, t.dev, t.point, t.doVal);
+                executed = true;
+                if (config_.verbose >= 1)
+                    std::cout << "[Iec104Slave] Remote control: IOA=" << ioA
+                              << " val=" << cmdVal
+                              << " DO(" << t.ch << "," << t.dev
+                              << "," << t.point << ")" << std::endl;
             }
         }
+        // H5 修复：以前当 cmdVal 不匹配任何 mapping 时会 fallback 到第一个
+        // entry 并强制写 DO —— 那是把不匹配值当成"随便找一个"的错误逻辑，
+        // 属于安全隐患（任意 cmdVal 都能触发 SetDoMaster）。改为不写 DO，
+        // 用 COT 里的 P/N=1（negative ack）告诉主站请求无效。
+        // 见 CLAUDE.md「已知陷阱 / 修复历史」H5 (code review)。
 
-        // Activation confirm
+        // Activation confirm （P/N=1 表 negative）
         uint8_t respAsdu[16];
         size_t p = 0;
         respAsdu[p++] = type;
         respAsdu[p++] = 0x01;
-        respAsdu[p++] = IecCOT::ACTIVATION_CON;
+        respAsdu[p++] = executed
+            ? IecCOT::ACTIVATION_CON
+            : static_cast<uint8_t>(IecCOT::ACTIVATION_CON | 0x40);   // COT 高位 P/N=1
         respAsdu[p++] = 0x00;
         respAsdu[p++] = static_cast<uint8_t>(coa & 0xFF);
         respAsdu[p++] = static_cast<uint8_t>((coa >> 8) & 0xFF);
