@@ -577,6 +577,22 @@ void PempServer::handle_call_tele_ind(const std::vector<uint8_t>& frame,
 
 // ==================== 主动上传：51H 遥信 ====================
 
+// H2 修复：PEMP 帧内 CH/DEV 只有 1 字节，规约上限 255。若配置里 chId/devNo
+// 超过 255，静默 & 0xFF 截断会把不同通道打包成同一字节，客户端无法区分。
+// 这个 helper 检查并 log 一次警告，返回 true 表示可以安全下发。
+// 见 CLAUDE.md「已知陷阱 / 修复历史」H2 (code review)。
+static bool CheckPempIds8Bit(uint16_t chId, uint16_t devNo)
+{
+    if (chId > 255 || devNo > 255) {
+        std::cerr << "[PempServer] 跳过上传：chId=" << chId
+                  << " devNo=" << devNo
+                  << " 超出 PEMP 规约 8 位限制（1..255），"
+                  << "请缩小点表 ID 或改用 IEC104" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 bool PempServer::do_upload_di(socket& client)
 {
     auto& mgr = RemoteDataMgr::Instance();
@@ -588,6 +604,7 @@ bool PempServer::do_upload_di(socket& client)
         {
             if (!g_running) return false;
             if (!client.is_open()) return false;
+            if (!CheckPempIds8Bit(chId, devNo)) continue;   // H2
 
             std::vector<DiPoint> diList;
             if (!mgr.GetDiList(chId, devNo, diList) || diList.empty())
@@ -633,6 +650,7 @@ bool PempServer::do_upload_ai(socket& client)
         {
             if (!g_running) return false;
             if (!client.is_open()) return false;
+            if (!CheckPempIds8Bit(chId, devNo)) continue;   // H2
 
             std::vector<AiPoint> aiList;
             if (!mgr.GetAiList(chId, devNo, aiList) || aiList.empty())
