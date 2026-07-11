@@ -45,11 +45,11 @@ protected:
     std::string cfgPath_;
 };
 
-// ─── C3 特征化 ─────────────────────────────────────────────────────
-// 现状：SetAi 每次调用都发 AIChange，无论值是否变化。SetDi 已经做了变化
-// 门控（bug #2 修复），这里锁定 SetAi 的老行为。
-// TODO(C3): 与 SetDi 对齐，只在 value 真变化时发布。届时翻转断言。
-TEST_F(DataMgrCharTest, TODO_SetAiAlwaysPublishesEvenOnSameValue) {
+// ─── C3 修复回归 ──────────────────────────────────────────────────
+// SetAi/SetDoMaster/SetAo 现已加变化门控，与 SetDi 对齐；只在值真变化
+// 时发布 EventBus 事件。之前是无差别发布，会灌爆 data_recorder 之类
+// 订阅者。
+TEST_F(DataMgrCharTest, SetAiOnlyPublishesOnValueChange) {
     LoadSingleDevConfig();
     std::atomic<int> events{0};
     auto tok = EventBus::Subscribe<AIChange>(
@@ -58,18 +58,17 @@ TEST_F(DataMgrCharTest, TODO_SetAiAlwaysPublishesEvenOnSameValue) {
     auto& mgr = RemoteDataMgr::Instance();
     ASSERT_TRUE(mgr.SetAi(1, 1, 1, 42.0));
     EXPECT_EQ(events.load(), 1);
-    ASSERT_TRUE(mgr.SetAi(1, 1, 1, 42.0));   // 相同值
-    // 当前行为：仍然发布。TODO(C3): 应改为不发。
+    ASSERT_TRUE(mgr.SetAi(1, 1, 1, 42.0));   // 相同值 → 不再发布
+    EXPECT_EQ(events.load(), 1);
+    ASSERT_TRUE(mgr.SetAi(1, 1, 1, 42.0));
+    EXPECT_EQ(events.load(), 1);
+    ASSERT_TRUE(mgr.SetAi(1, 1, 1, 43.0));   // 真变化 → 发
     EXPECT_EQ(events.load(), 2);
-    ASSERT_TRUE(mgr.SetAi(1, 1, 1, 42.0));   // 再一次
-    EXPECT_EQ(events.load(), 3);
 
     EventBus::Unsubscribe<AIChange>(tok);
 }
 
-// 现状：SetDoMaster 每次调用都发 DOChange，无论值是否变化。
-// TODO(C3): 应仅在 masterVal 变化时发。
-TEST_F(DataMgrCharTest, TODO_SetDoMasterAlwaysPublishesEvenOnSameValue) {
+TEST_F(DataMgrCharTest, SetDoMasterOnlyPublishesOnValueChange) {
     LoadSingleDevConfig();
     std::atomic<int> events{0};
     auto tok = EventBus::Subscribe<DOChange>(
@@ -78,15 +77,15 @@ TEST_F(DataMgrCharTest, TODO_SetDoMasterAlwaysPublishesEvenOnSameValue) {
     auto& mgr = RemoteDataMgr::Instance();
     ASSERT_TRUE(mgr.SetDoMaster(1, 1, 1, true));
     EXPECT_EQ(events.load(), 1);
-    ASSERT_TRUE(mgr.SetDoMaster(1, 1, 1, true));   // 同值
-    EXPECT_EQ(events.load(), 2);   // TODO(C3): 应仍为 1
+    ASSERT_TRUE(mgr.SetDoMaster(1, 1, 1, true));   // 相同值 → 不发
+    EXPECT_EQ(events.load(), 1);
+    ASSERT_TRUE(mgr.SetDoMaster(1, 1, 1, false));  // 变化 → 发
+    EXPECT_EQ(events.load(), 2);
 
     EventBus::Unsubscribe<DOChange>(tok);
 }
 
-// 现状：SetAo 每次调用都发 AOChange。
-// TODO(C3): 应仅在 value 变化时发。
-TEST_F(DataMgrCharTest, TODO_SetAoAlwaysPublishesEvenOnSameValue) {
+TEST_F(DataMgrCharTest, SetAoOnlyPublishesOnValueChange) {
     LoadSingleDevConfig();
     std::atomic<int> events{0};
     auto tok = EventBus::Subscribe<AOChange>(
@@ -95,8 +94,10 @@ TEST_F(DataMgrCharTest, TODO_SetAoAlwaysPublishesEvenOnSameValue) {
     auto& mgr = RemoteDataMgr::Instance();
     ASSERT_TRUE(mgr.SetAo(1, 1, 1, 3.14));
     EXPECT_EQ(events.load(), 1);
-    ASSERT_TRUE(mgr.SetAo(1, 1, 1, 3.14));   // 同值
-    EXPECT_EQ(events.load(), 2);   // TODO(C3): 应仍为 1
+    ASSERT_TRUE(mgr.SetAo(1, 1, 1, 3.14));   // 相同值 → 不发
+    EXPECT_EQ(events.load(), 1);
+    ASSERT_TRUE(mgr.SetAo(1, 1, 1, 2.71));   // 变化 → 发
+    EXPECT_EQ(events.load(), 2);
 
     EventBus::Unsubscribe<AOChange>(tok);
 }
@@ -112,7 +113,10 @@ TEST_F(DataMgrCharTest, TODO_AoChangeQueueGrowsWithoutConsumer) {
 
     EXPECT_EQ(mgr.PendingAoChangeCount(), static_cast<size_t>(0));
 
-    for (int i = 0; i < 100; ++i)
+    // 100 次连续变化值（1..100），每次 SetAo 都触发入队
+    // 注：C3 修复后 SetAo 只在真变化时入列；起始 value 默认 0.0，
+    // 所以从 1 开始能保证每次相对上次都变化。
+    for (int i = 1; i <= 100; ++i)
         ASSERT_TRUE(mgr.SetAo(1, 1, 1, static_cast<double>(i)));
 
     // 100 次 SetAo，无人消费 → 队列长度 100

@@ -197,10 +197,16 @@ bool RemoteDataMgr::SetAi(uint16_t ch, uint16_t dev,
         {
             if (ap.pointNo == pt)
             {
+                // C3 修复：仅在 value 真变化时发布，避免高频 poll 灌爆
+                // EventBus 订阅者（data_recorder / iec104_slave 等）。
+                // 与 SetDi 的门控语义对齐。
+                double oldVal = ap.value;
                 ap.value = val;
-                uint64_t n = NowMs();
-                ev = AIChange{ch, dev, pt, val, n};
-                shouldPublish = true;
+                if (oldVal != val) {
+                    uint64_t n = NowMs();
+                    ev = AIChange{ch, dev, pt, val, n};
+                    shouldPublish = true;
+                }
                 return true;
             }
         }
@@ -222,10 +228,13 @@ bool RemoteDataMgr::SetDoMaster(uint16_t ch, uint16_t dev,
             if (dpt.pointNo == pt)
             {
                 wasZero = !dpt.masterVal;
+                bool changed = (dpt.masterVal != val);   // C3
                 dpt.masterVal = val;
-                uint64_t n = NowMs();
-                ev = DOChange{ch, dev, pt, val, dpt.slaveVal, n};
-                shouldPublish = true;
+                if (changed) {
+                    uint64_t n = NowMs();
+                    ev = DOChange{ch, dev, pt, val, dpt.slaveVal, n};
+                    shouldPublish = true;
+                }
                 return true;
             }
         }
@@ -254,10 +263,13 @@ bool RemoteDataMgr::SetDoSlave(uint16_t ch, uint16_t dev,
         {
             if (dpt.pointNo == pt)
             {
+                bool changed = (dpt.slaveVal != val);   // C3
                 dpt.slaveVal = val;
-                uint64_t n = NowMs();
-                ev = DOChange{ch, dev, pt, dpt.masterVal, val, n};
-                shouldPublish = true;
+                if (changed) {
+                    uint64_t n = NowMs();
+                    ev = DOChange{ch, dev, pt, dpt.masterVal, val, n};
+                    shouldPublish = true;
+                }
                 return true;
             }
         }
@@ -277,10 +289,13 @@ bool RemoteDataMgr::SetAo(uint16_t ch, uint16_t dev,
         {
             if (ap.pointNo == pt)
             {
+                double oldVal = ap.value;              // C3
                 ap.value = val;
-                uint64_t n = NowMs();
-                ev = AOChange{ch, dev, pt, val, n};
-                shouldPublish = true;
+                if (oldVal != val) {
+                    uint64_t n = NowMs();
+                    ev = AOChange{ch, dev, pt, val, n};
+                    shouldPublish = true;
+                }
                 return true;
             }
         }
@@ -290,7 +305,8 @@ bool RemoteDataMgr::SetAo(uint16_t ch, uint16_t dev,
     if (shouldPublish) EventBus::Publish(ev);
 
     // devMtx 已释放，AO 变化入列（仅追踪，不复位）
-    if (found)
+    // C3 修复副作用：只在真变化时入队，避免高频重复 poll 灌爆同步队列。
+    if (shouldPublish)
     {
         std::lock_guard<std::mutex> lock(aoQueueMtx_);
         aoChangeQueue_.push_back({ch, dev, pt, ev.value, ev.tsMs});
