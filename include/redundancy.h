@@ -19,6 +19,8 @@
 #include <memory>
 #include <cstdint>
 #include <deque>
+#include <mutex>
+#include <vector>
 
 enum class RedundRole : uint8_t {
     Idle    = 0,
@@ -56,6 +58,60 @@ constexpr uint8_t  HB_END   = 0x7D;
 constexpr uint8_t  SYNC_START = 0x7B;
 constexpr uint8_t  SYNC_FUN   = 0x56;
 constexpr uint8_t  SYNC_END   = 0x7D;
+
+// ── 心跳 / 同步帧的纯编解码 + 角色决策（对外暴露供单元测试） ──
+// 见 tests/test_redundancy_frame_codec.cxx 和 test_redundancy_role_transitions.cxx。
+namespace pmpc {
+namespace redundancy {
+
+// 心跳帧解析结果
+struct HeartbeatInfo {
+    RedundRole role     = RedundRole::Idle;
+    uint64_t   tsMs     = 0;
+    uint16_t   priority = 0;   ///< 修复 C4：0 表示旧格式帧未携带 priority
+};
+
+// 心跳帧格式：
+//   [START(1) | FUN(1) | LEN(2 little-endian) | ROLE(1) | TS(8) | (PRI(2))? | END(1)]
+// 兼容层：
+//   老格式：LEN=8 (只覆盖 TS)，总长 14 字节，无 priority；老代码定长 recv 14。
+//   新格式：LEN=11 (payload=ROLE+TS+PRI 全部)，总长 16 字节。
+// ParseHeartbeatFrame 两种都接受，BuildHeartbeatFrame 只产生新格式。
+std::vector<uint8_t> BuildHeartbeatFrame(RedundRole role, uint16_t priority, uint64_t tsMs);
+bool                 ParseHeartbeatFrame(const uint8_t* data, size_t len,
+                                         HeartbeatInfo& out);
+
+// 同步帧格式：
+//   [START(1) | FUN(1) | LEN(2 little-endian) | TYPE(1) | CH(2) | DEV(2) |
+//    PT(2) | VALUE(8, IEEE754 double) | TS(8) | END(1)]
+// 定长 28 字节，LEN 固定为 23。
+std::vector<uint8_t> BuildSyncFrame(const ChangeEvent& ev);
+bool                 ParseSyncFrame(const uint8_t* data, size_t len, ChangeEvent& ev);
+
+// 角色决策纯函数：给定当前状态和输入信号，返回下一步应该切到的角色。
+// 输入不带自身/远端 io 或时间读，方便表驱动测试；
+// SetRole 的副作用（syncChannel_.Start* / roleCb_ / collectCb_）由调用方处理。
+//
+// 语义（与原 CheckFailover 一致）：
+//   ┌─ peerAlive == false（心跳丢失）─────────────────────────────────────
+//   │  若 missedHeartbeats >= missedLimit 且 role ∈ {Standby, Idle} → Master
+//   │  否则维持 role
+//   └─ peerAlive == true ─────────────────────────────────────────────────
+//      若 role == Idle：
+//        peerRole==Master   → Standby
+//        peerRole 其他      → 优先级高的升主，等优先级留 Standby（避免双主）
+//      若 role == Master 且 peerRole == Master：
+//        优先级低的降为 Standby；等优先级维持 Master（保持一方主导）
+//      其它情况维持
+//
+// 修复 C4：CheckFailover 里对 peerPriority 的引用之前没有心跳字段承载，
+// 现在这个函数明确接收 peerPriority；调用方从 ParseHeartbeatFrame 拿到值。
+RedundRole DecideRole(RedundRole role, RedundRole peerRole, bool peerAlive,
+                      int missedHeartbeats, int missedLimit,
+                      uint16_t localPriority, uint16_t peerPriority);
+
+} // namespace redundancy
+} // namespace pmpc
 
 class SyncChannel {
 public:

@@ -20,33 +20,133 @@ std::string ChangeEvent::ToString() const {
     return b;
 }
 
-std::vector<uint8_t>SyncChannel::BuildSyncFrame(const ChangeEvent& ev){
+// ============================================================================
+// pmpc::redundancy 纯编解码 + 角色决策
+// ============================================================================
+namespace pmpc { namespace redundancy {
+
+std::vector<uint8_t> BuildHeartbeatFrame(RedundRole role, uint16_t priority, uint64_t tsMs)
+{
+    // 新格式：payload = ROLE(1) + TS(8) + PRI(2) = 11 字节，LEN 存 payload 长度。
+    // 总帧长 = 1(START) + 1(FUN) + 2(LEN) + 11(payload) + 1(END) = 16 字节。
+    // 注意：老实现的心跳帧 LEN 字段写死为 8（未含 ROLE，且从未被 ListenLoop
+    // 校验，因为老代码定长 recv 14 字节）。为向前兼容，ParseHeartbeatFrame
+    // 同时接受 LEN=8（老帧长 14）和 LEN=11（新帧长 16）。
     std::vector<uint8_t> f;
-    f.push_back(SYNC_START);f.push_back(SYNC_FUN);
-    f.push_back(0);f.push_back(0);
-    f.push_back(ev.type);
-    f.push_back((uint8_t)(ev.channel&0xFF));f.push_back((uint8_t)((ev.channel>>8)&0xFF));
-    f.push_back((uint8_t)(ev.device&0xFF));f.push_back((uint8_t)((ev.device>>8)&0xFF));
-    f.push_back((uint8_t)(ev.point&0xFF));f.push_back((uint8_t)((ev.point>>8)&0xFF));
-    uint64_t rv;memcpy(&rv,&ev.dvalue,sizeof(rv));
-    for(int i=0;i<8;i++)f.push_back((uint8_t)((rv>>(i*8))&0xFF));
-    for(int i=0;i<8;i++)f.push_back((uint8_t)((ev.tsMs>>(i*8))&0xFF));
-    f[2]=23;f[3]=0;f.push_back(SYNC_END);
+    f.reserve(16);
+    f.push_back(HB_START);
+    f.push_back(HB_FUN);
+    f.push_back(11);              // LEN low = payload 长度
+    f.push_back(0);               // LEN high
+    f.push_back(static_cast<uint8_t>(role));
+    for (int i = 0; i < 8; i++) f.push_back(static_cast<uint8_t>((tsMs >> (i * 8)) & 0xFF));
+    f.push_back(static_cast<uint8_t>(priority & 0xFF));
+    f.push_back(static_cast<uint8_t>((priority >> 8) & 0xFF));
+    f.push_back(HB_END);
     return f;
 }
-bool SyncChannel::ParseSyncFrame(const uint8_t*d,size_t len,ChangeEvent& ev){
-    if(len<28||d[0]!=SYNC_START||d[1]!=SYNC_FUN||d[len-1]!=SYNC_END)return false;
-    unsigned a,b;
-    a=(unsigned)d[5];b=(unsigned)d[6]<<8;ev.channel=(uint16_t)(a|b);
-    a=(unsigned)d[7];b=(unsigned)d[8]<<8;ev.device=(uint16_t)(a|b);
-    a=(unsigned)d[9];b=(unsigned)d[10]<<8;ev.point=(uint16_t)(a|b);
-    ev.type=d[4];
-    uint64_t rv=0;
-    for(int i=0;i<8;i++)rv|=(uint64_t)d[11+i]<<(i*8);
-    memcpy(&ev.dvalue,&rv,sizeof(ev.dvalue));ev.value=(uint64_t)ev.dvalue;
-    ev.tsMs=0;
-    for(int i=0;i<8;i++)ev.tsMs|=(uint64_t)d[19+i]<<(i*8);
+
+bool ParseHeartbeatFrame(const uint8_t* data, size_t len, HeartbeatInfo& out)
+{
+    if (len < 14 || data[0] != HB_START || data[1] != HB_FUN) return false;
+    const unsigned dl = static_cast<unsigned>(data[2]) |
+                        (static_cast<unsigned>(data[3]) << 8);
+    // 兼容层：
+    //   老帧：LEN=8，总长 14（LEN 字段实际只覆盖 TS 8 字节，未含 ROLE）
+    //   新帧：LEN=11，总长 16（LEN 覆盖 ROLE+TS+PRI 全 payload）
+    size_t expected = 0;
+    if      (dl == 8)  expected = 14;
+    else if (dl == 11) expected = 16;
+    else               return false;
+    if (len < expected) return false;
+    if (data[expected - 1] != HB_END) return false;
+
+    out.role = static_cast<RedundRole>(data[4]);
+    out.tsMs = 0;
+    for (int i = 0; i < 8; i++)
+        out.tsMs |= static_cast<uint64_t>(data[5 + i]) << (i * 8);
+    if (expected == 16) {
+        out.priority = static_cast<uint16_t>(
+            static_cast<unsigned>(data[13]) |
+            (static_cast<unsigned>(data[14]) << 8));
+    } else {
+        out.priority = 0;   // 老格式：无 priority 信息
+    }
     return true;
+}
+
+std::vector<uint8_t> BuildSyncFrame(const ChangeEvent& ev)
+{
+    std::vector<uint8_t> f;
+    f.reserve(28);
+    f.push_back(SYNC_START);
+    f.push_back(SYNC_FUN);
+    f.push_back(23);      // LEN low  = 23 (payload 长度)
+    f.push_back(0);       // LEN high
+    f.push_back(ev.type);
+    f.push_back(static_cast<uint8_t>(ev.channel & 0xFF));
+    f.push_back(static_cast<uint8_t>((ev.channel >> 8) & 0xFF));
+    f.push_back(static_cast<uint8_t>(ev.device  & 0xFF));
+    f.push_back(static_cast<uint8_t>((ev.device  >> 8) & 0xFF));
+    f.push_back(static_cast<uint8_t>(ev.point   & 0xFF));
+    f.push_back(static_cast<uint8_t>((ev.point   >> 8) & 0xFF));
+    uint64_t rv;
+    std::memcpy(&rv, &ev.dvalue, sizeof(rv));
+    for (int i = 0; i < 8; i++) f.push_back(static_cast<uint8_t>((rv >> (i * 8)) & 0xFF));
+    for (int i = 0; i < 8; i++) f.push_back(static_cast<uint8_t>((ev.tsMs >> (i * 8)) & 0xFF));
+    f.push_back(SYNC_END);
+    return f;
+}
+
+bool ParseSyncFrame(const uint8_t* d, size_t len, ChangeEvent& ev)
+{
+    if (len < 28 || d[0] != SYNC_START || d[1] != SYNC_FUN || d[len - 1] != SYNC_END)
+        return false;
+    unsigned a, b;
+    a = static_cast<unsigned>(d[5]);  b = static_cast<unsigned>(d[6])  << 8; ev.channel = static_cast<uint16_t>(a | b);
+    a = static_cast<unsigned>(d[7]);  b = static_cast<unsigned>(d[8])  << 8; ev.device  = static_cast<uint16_t>(a | b);
+    a = static_cast<unsigned>(d[9]);  b = static_cast<unsigned>(d[10]) << 8; ev.point   = static_cast<uint16_t>(a | b);
+    ev.type = d[4];
+    uint64_t rv = 0;
+    for (int i = 0; i < 8; i++) rv |= static_cast<uint64_t>(d[11 + i]) << (i * 8);
+    std::memcpy(&ev.dvalue, &rv, sizeof(ev.dvalue));
+    ev.value = static_cast<uint64_t>(ev.dvalue);
+    ev.tsMs  = 0;
+    for (int i = 0; i < 8; i++) ev.tsMs |= static_cast<uint64_t>(d[19 + i]) << (i * 8);
+    return true;
+}
+
+RedundRole DecideRole(RedundRole role, RedundRole peerRole, bool peerAlive,
+                      int missedHeartbeats, int missedLimit,
+                      uint16_t localPriority, uint16_t peerPriority)
+{
+    if (!peerAlive) {
+        if (missedHeartbeats >= missedLimit &&
+            (role == RedundRole::Standby || role == RedundRole::Idle)) {
+            return RedundRole::Master;
+        }
+        return role;
+    }
+    // peerAlive
+    if (role == RedundRole::Idle) {
+        if (peerRole == RedundRole::Master) return RedundRole::Standby;
+        // 两个 Idle 或 Idle+Standby：优先级高升主，等优先级留 Standby 避免双主
+        return (localPriority > peerPriority) ? RedundRole::Master : RedundRole::Standby;
+    }
+    if (role == RedundRole::Master && peerRole == RedundRole::Master) {
+        // 双主检测：本地优先级严格低才降级；等优先级维持 Master 由通信另一端降
+        if (localPriority < peerPriority) return RedundRole::Standby;
+    }
+    return role;
+}
+
+}} // namespace pmpc::redundancy
+
+std::vector<uint8_t>SyncChannel::BuildSyncFrame(const ChangeEvent& ev){
+    return pmpc::redundancy::BuildSyncFrame(ev);
+}
+bool SyncChannel::ParseSyncFrame(const uint8_t*d,size_t len,ChangeEvent& ev){
+    return pmpc::redundancy::ParseSyncFrame(d, len, ev);
 }
 bool SyncChannel::StartMaster(uint16_t port){
     port_=port;running_=true;
@@ -178,11 +278,11 @@ void RedundancyManager::HeartbeatLoop(){
                 catch(...){/* 连接失败，由外层循环定时重试 */ try{hbSendSock_.close();}catch(...){} }
             }
             if(hbSendSock_.is_open()) try{
-                uint8_t f[14];f[0]=HB_START;f[1]=HB_FUN;f[2]=8;f[3]=0;
-                f[4]=(uint8_t)role_.load();uint64_t ts=NowMs();
-                for(int i=0;i<8;i++)f[5+i]=(uint8_t)((ts>>(i*8))&0xFF);
-                f[13]=HB_END;
-                size_t t=0;while(t<14)t+=hbSendSock_.send(f+t,14-t);
+                // 修复 C4：心跳里携带本机 priority，对端 ListenLoop 可解析并
+                // 存入 peerPriority_，供 CheckFailover 双主/等优先决策。
+                auto f = pmpc::redundancy::BuildHeartbeatFrame(
+                    role_.load(), static_cast<uint16_t>(priority_), NowMs());
+                size_t t=0;while(t<f.size())t+=hbSendSock_.send(f.data()+t,f.size()-t);
             }catch(const socket_error&e){
                 std::cerr<<"[Redundancy] hb send: "<<e.what()<<std::endl;
                 try{hbSendSock_.close();}catch(...){}peerAlive_=false;CheckFailover();
@@ -197,12 +297,25 @@ void RedundancyManager::ListenLoop(){
         try{socket_addr p;socket c=hbListenSock_.accept(&p);
             std::cout<<"[Redundancy] hb from: "<<p.to_string()<<std::endl;
             while(running_){
-                uint8_t b[14];size_t t=0;
-                while(t<14){size_t n=c.recv(b+t,14-t);if(n==0)break;t+=n;}
-                if(t<14)break;
-                if(b[0]==HB_START&&b[1]==HB_FUN&&b[13]==HB_END){
-                    missedHeartbeats_=0;
-                    peerRole_ = static_cast<RedundRole>(b[4]);
+                // 先读 START+FUN+LEN(2)，再依 LEN 读剩余；兼容老 14 字节 / 新 16 字节
+                uint8_t hdr[4]; size_t t=0;
+                while(t<4){size_t n=c.recv(hdr+t,4-t);if(n==0)break;t+=n;}
+                if(t<4)break;
+                unsigned dl = static_cast<unsigned>(hdr[2]) |
+                              (static_cast<unsigned>(hdr[3]) << 8);
+                if (dl != 8 && dl != 11) { continue; }  // 无效帧
+                size_t tail = (dl == 8) ? 10 : 12;    // ROLE+TS(+PRI) + END
+                uint8_t buf[32];
+                std::memcpy(buf, hdr, 4);
+                t=0;while(t<tail){size_t n=c.recv(buf+4+t,tail-t);if(n==0)break;t+=n;}
+                if(t<tail)break;
+                size_t total = 4 + tail;
+
+                pmpc::redundancy::HeartbeatInfo info;
+                if (pmpc::redundancy::ParseHeartbeatFrame(buf, total, info)) {
+                    missedHeartbeats_ = 0;
+                    peerRole_    = info.role;
+                    peerPriority_ = info.priority;
                     if(!peerAlive_){peerAlive_=true;std::cout<<"[Redundancy] peer online"<<std::endl;}
                     CheckFailover();
                 }
@@ -213,36 +326,16 @@ void RedundancyManager::ListenLoop(){
 }
 void RedundancyManager::CheckFailover(){
     if(!running_||NowMs()<startupCompleteTime_)return;
-    if(!peerAlive_){
-        missedHeartbeats_++;
-        if(missedHeartbeats_>=missedHeartbeatLimit_){
-            if(role_==RedundRole::Standby){
-                // 备机超时 → 升主
-                SetRole(RedundRole::Master);
-            }else if(role_==RedundRole::Idle){
-                // Idle 超时 → 升主（启动时对端未上线）
-                SetRole(RedundRole::Master);
-            }
-        }
-    }else{
-        // 对端在线时的角色决策
-        if(role_==RedundRole::Idle){
-            // 对端已是 Master → 本站为 Standby
-            // 对端是 Standby/Idle → 本站根据优先级决策
-            if(peerRole_==RedundRole::Master){
-                SetRole(RedundRole::Standby);
-            }else{
-                // 两个 Idle 或两个 Standby：优先级高的升主
-                // 若优先级相同，优先留在 Standby 避免双主
-                SetRole(priority_ > peerPriority_ ? RedundRole::Master : RedundRole::Standby);
-            }
-        }else if(role_==RedundRole::Master && peerRole_==RedundRole::Master){
-            // 双主检测：降级优先级低的
-            if(priority_ < peerPriority_){
-                std::cerr<<"[Redundancy] 双主检测，本站降级"<<std::endl;
-                SetRole(RedundRole::Standby);
-            }
-        }
+    // 心跳丢失时先自增计数，让 DecideRole 拿到最新数值判断是否 promote。
+    if(!peerAlive_) missedHeartbeats_++;
+    RedundRole next = pmpc::redundancy::DecideRole(
+        role_.load(), peerRole_.load(), peerAlive_.load(),
+        missedHeartbeats_, missedHeartbeatLimit_,
+        static_cast<uint16_t>(priority_), peerPriority_);
+    if (next != role_.load()) {
+        if (role_.load() == RedundRole::Master && next == RedundRole::Standby)
+            std::cerr<<"[Redundancy] 双主检测，本站降级"<<std::endl;
+        SetRole(next);
     }
 }
 void RedundancyManager::SetRole(RedundRole nr){

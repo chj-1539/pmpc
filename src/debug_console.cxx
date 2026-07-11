@@ -11,6 +11,7 @@
 #include "packet_logger.h"
 #include "ini_reader.h"
 #include "str_util.h"
+#include "telnet_iac.h"
 #include <iostream>
 #include <sstream>
 #include <cstring>
@@ -37,42 +38,9 @@ constexpr size_t SEND_BUF_SIZE = 4096;
 constexpr int    RECV_TIMEOUT_MS = 500;
 
 // ─── 过滤 telnet IAC 协商字节 ──────────────────────────────────────────
-// 纯文本 TCP 服务无需响应 telnet 协商，直接把 IAC 序列丢弃
-static std::string filter_telnet_iac(const uint8_t* data, size_t len)
-{
-    std::string out;
-    for (size_t i = 0; i < len; i++) {
-        if (data[i] == 0xFF) {
-            // IAC 序列：至少 2 字节
-            if (i + 1 >= len) break;
-            uint8_t cmd = data[i + 1];
-            if (cmd == 0xFF) {
-                // IAC IAC（转义的 0xFF）— 保留一个
-                out += '\xFF';
-                i += 1;
-            } else if (cmd == 0xF0) {
-                // SE — 2 字节
-                i += 1;
-            } else if (cmd == 0xFA) {
-                // SB … SE 子协商 — 变长，跳过直到 IAC SE
-                i += 2;
-                while (i + 1 < len && !(data[i] == 0xFF && data[i + 1] == 0xF0))
-                    i++;
-                if (i + 1 < len) i += 1; // 跳过 SE
-            } else if (cmd >= 0xFB && cmd <= 0xFE) {
-                // WILL(0xFB)/WONT(0xFC)/DO(0xFD)/DONT(0xFE) — 3 字节: IAC + cmd + opt
-                i += 2;
-            } else {
-                // 其余 2 字节 IAC 命令: NOP(0xF1)/BREAK(0xF3)/IP(0xF4)/AO(0xF5)/
-                // AYT(0xF6)/EC(0xF7)/EL(0xF8)/GA(0xF9) 等
-                i += 1;
-            }
-        } else {
-            out += static_cast<char>(data[i]);
-        }
-    }
-    return out;
-}
+// 实现已迁移到 include/telnet_iac.h（pmpc::filter_telnet_iac），
+// 便于直接单元测试。见 tests/test_debug_console_telnet.cxx (bug #3 回归)。
+using pmpc::filter_telnet_iac;
 
 // ─── UTF-8 → 本地编码（解决 Windows telnet 中文乱码） ─────────────────────
 #ifdef _WIN32

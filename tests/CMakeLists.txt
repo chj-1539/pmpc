@@ -111,3 +111,28 @@ add_pmpc_test(test_cdt_master_parser test_cdt_master_parser.cxx)
 add_pmpc_test(test_debug_console_lifecycle test_debug_console_lifecycle.cxx
     ${CMAKE_SOURCE_DIR}/src/socket.cpp
 )
+
+# Bug #3: debug_console telnet IAC 过滤（filter_telnet_iac 提到 include/telnet_iac.h）
+add_pmpc_test(test_debug_console_telnet test_debug_console_telnet.cxx)
+
+# C4: Redundancy 心跳/同步帧编解码回归（peerPriority 字段修复）
+add_pmpc_test(test_redundancy_frame_codec test_redundancy_frame_codec.cxx
+    ${CMAKE_SOURCE_DIR}/src/redundancy.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_data_mgr.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_config_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/ini_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/soe_queue.cxx
+    ${CMAKE_SOURCE_DIR}/src/protocol.cxx
+    ${CMAKE_SOURCE_DIR}/src/socket.cpp
+)
+
+# C5: Redundancy DecideRole 表驱动回归
+add_pmpc_test(test_redundancy_role_transitions test_redundancy_role_transitions.cxx
+    ${CMAKE_SOURCE_DIR}/src/redundancy.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_data_mgr.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_config_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/ini_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/soe_queue.cxx
+    ${CMAKE_SOURCE_DIR}/src/protocol.cxx
+    ${CMAKE_SOURCE_DIR}/src/socket.cpp
+)

@@ -120,6 +120,32 @@ TEST_F(DataMgrTest, DiFiresEventBusForNonCommPoints) {
     EventBus::Unsubscribe<DIChange>(token);
 }
 
+// 回归 CLAUDE.md bug #2：SetDi 相同值应 **不** 重发 DIChange。
+// 早期版本 `(void)change` 忽略参数，每次都无条件发布。
+TEST_F(DataMgrTest, SetDiSameValueDoesNotRepublish) {
+    std::atomic<int> eventCount{0};
+    auto token = EventBus::Subscribe<DIChange>(
+        [&](const DIChange&) { eventCount++; });
+
+    auto& mgr = RemoteDataMgr::Instance();
+    ASSERT_TRUE(mgr.SetDi(1, 1, 2, true, 1000, true));   // false → true
+    EXPECT_EQ(eventCount.load(), 1);
+
+    ASSERT_TRUE(mgr.SetDi(1, 1, 2, true, 2000, true));   // true → true：不应发
+    EXPECT_EQ(eventCount.load(), 1);
+
+    ASSERT_TRUE(mgr.SetDi(1, 1, 2, true, 3000, true));   // 再来一次：仍不发
+    EXPECT_EQ(eventCount.load(), 1);
+
+    ASSERT_TRUE(mgr.SetDi(1, 1, 2, false, 4000, true));  // true → false：应发
+    EXPECT_EQ(eventCount.load(), 2);
+
+    ASSERT_TRUE(mgr.SetDi(1, 1, 2, false, 5000, true));  // false → false：不应发
+    EXPECT_EQ(eventCount.load(), 2);
+
+    EventBus::Unsubscribe<DIChange>(token);
+}
+
 // ==================== AI (遥测) ====================
 
 TEST_F(DataMgrTest, SetAndGetAi) {
