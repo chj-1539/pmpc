@@ -236,6 +236,17 @@ add_pmpc_test(test_modbus_ao_epsilon test_modbus_ao_epsilon.cxx)
 # H6: Modbus master 地址范围合并（ComputeAddrSpan 已 inline template）
 add_pmpc_test(test_modbus_master_addr_span test_modbus_master_addr_span.cxx)
 
+# L5: Redundancy 缺少配置文件时应 return false 而非默认双主
+add_pmpc_test(test_redundancy_loadconfig test_redundancy_loadconfig.cxx
+    ${CMAKE_SOURCE_DIR}/src/redundancy.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_data_mgr.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_config_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/ini_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/soe_queue.cxx
+    ${CMAKE_SOURCE_DIR}/src/protocol.cxx
+    ${CMAKE_SOURCE_DIR}/src/socket.cpp
+)
+
 # H5: iec104_slave 遥控 fallback 修复回归（DecideRemoteControlTargets 已 inline）
 add_pmpc_test(test_iec104_slave_remote_ctrl test_iec104_slave_remote_ctrl.cxx)
 

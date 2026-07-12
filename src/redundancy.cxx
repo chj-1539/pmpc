@@ -214,7 +214,16 @@ RedundancyManager::~RedundancyManager(){Stop();}
 
 bool RedundancyManager::LoadConfig(const std::string& cp){
     std::ifstream fi(cp);
-    if(!fi.is_open()){std::cerr<<"[Redundancy] cannot open: "<<cp<<std::endl;return true;}
+    // L5 修复：以前打不开配置就 return true，让 Start() 用硬编码默认值
+    // (peerIp_=127.0.0.1)。两台机器都没配置就会互相认为对方在 localhost，
+    // 双主同机撞车。改为 return false —— ModuleManager 会跳过 redundancy
+    // 模块，比"默认双主"安全得多。
+    if(!fi.is_open()){
+        std::cerr<<"[Redundancy] 无法打开配置文件: "<<cp
+                 <<" — 已禁用冗余模块（改回 return true 会以 localhost 默认启动，"
+                 <<"极易造成同机双主）"<<std::endl;
+        return false;
+    }
     std::string l;
     while(std::getline(fi,l)){
         if(!l.empty()&&l.back()=='\r')l.pop_back();
