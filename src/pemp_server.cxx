@@ -129,12 +129,14 @@ void PempServer::stop()
         if (t.joinable()) t.join();
     listenSocks_.clear();
     acceptThreads_.clear();
-    // 分离客户端线程而非 join，避免阻塞等待 recv 超时
-    // 客户端线程会在 recv 失败或检测到 running_=false 后自行退出
+    // L6 修复：以前 detach 客户端线程，之后 ~PempServer/delete server 会
+    // 使已 detach 的线程访问被析构的成员（use-after-free）。
+    // client_handler 的 recv 超时是 500ms 且循环检查 running_，最坏 500ms
+    // 内自行退出，可以安全 join。
     {
         std::lock_guard<std::mutex> lock(clientMtx_);
         for (auto& t : clientThreads_)
-            if (t.joinable()) t.detach();
+            if (t.joinable()) t.join();
         clientThreads_.clear();
     }
 }
