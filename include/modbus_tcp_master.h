@@ -246,6 +246,24 @@ public:
     // 生产代码不使用。见 CLAUDE.md「已知陷阱 / 修复历史」bug #5。
     friend class ModbusTcpMasterTestAccess;
 
+    // AO "值几乎相等" 判定 —— H9 修复用（Modbus AO 写回节流）。
+    // 老代码用绝对容差 std::abs(a - b) < 0.001，对量程差异大的场景不友好：
+    //   * 1e9 附近，浮点精度就 >0.001，两次采相同值也判为"变化"，一直重发
+    //   * 1e-6 附近，两个明显不同的值仍会被判为"相同"，漏发
+    // 用相对+绝对混合：|a-b| <= max(absTol, relTol * max(|a|,|b|))
+    // 见 tests/test_modbus_ao_epsilon.cxx。默认参数与生产量程匹配。
+    static inline bool AoAlmostEqual(double a, double b,
+                                     double absTol = 1e-6,
+                                     double relTol = 1e-4) {
+        double diff = a > b ? a - b : b - a;
+        double aa = a >= 0 ? a : -a;
+        double bb = b >= 0 ? b : -b;
+        double scale = aa > bb ? aa : bb;
+        double bound = relTol * scale;
+        if (bound < absTol) bound = absTol;
+        return diff <= bound;
+    }
+
 private:
     // ── 配置解析 ──
     bool ParseGlobal(const std::string& key, const std::string& val);

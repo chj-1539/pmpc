@@ -1349,7 +1349,8 @@ void ModbusTcpMaster::WriteAOChanges(socket& sock, uint16_t& transId,
         {
             std::lock_guard<std::mutex> lock(sentMtx_);
             auto it = aoSent_.find(key);
-            if (it != aoSent_.end() && std::abs(it->second - pt.value) < 0.001)
+            // H9 修复：改用相对+绝对容差，见 ModbusTcpMaster::AoAlmostEqual。
+            if (it != aoSent_.end() && AoAlmostEqual(it->second, pt.value))
                 continue;
         }
 

@@ -683,8 +683,14 @@ bool ModbusRtuMaster::WriteAOChanges(CommIO& io, const DeviceConfig& dev, int ti
         {
             std::lock_guard<std::mutex> lock(sentMtx_);
             auto it = aoSent_.find(key);
-            if (it != aoSent_.end() && std::abs(it->second - pt.value) < 0.001)
-                continue;
+            // H9 修复：绝对+相对容差混合，见 ModbusTcpMaster::AoAlmostEqual
+            // （逻辑复用 —— 直接内联在这里，避免跨 module header 依赖）。
+            if (it != aoSent_.end()) {
+                double diff = std::abs(it->second - pt.value);
+                double scale = std::max(std::abs(it->second), std::abs(pt.value));
+                double bound = std::max(1e-6, 1e-4 * scale);
+                if (diff <= bound) continue;
+            }
         }
 
         // FC06: Write Single Register (UInt16)

@@ -41,6 +41,7 @@ test_iec104_slave_remote_ctrl   | test_iec104_slave_remote_ctrl.cxx   |
 test_iec101_master_multichannel | test_iec101_master_multichannel.cxx | src/iec101_master.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/packet_logger.cxx src/module_manager.cxx src/modbus_tcp_master.cxx src/pemp_server.cxx src/redundancy.cxx src/socket.cpp src/serial_port.cpp
 test_iec104_recvframe           | test_iec104_recvframe.cxx           | src/iec104_master.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/packet_logger.cxx src/module_manager.cxx src/modbus_tcp_master.cxx src/pemp_server.cxx src/redundancy.cxx src/socket.cpp src/serial_port.cpp
 test_iec104_slave_thread_cleanup| test_iec104_slave_thread_cleanup.cxx|
+test_modbus_ao_epsilon          | test_modbus_ao_epsilon.cxx          |
 #
 # === Phase 3: 协议主站测试 (待添加) ===
 #
