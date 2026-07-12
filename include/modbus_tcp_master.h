@@ -264,6 +264,32 @@ public:
         return diff <= bound;
     }
 
+    // 从一组 (addr, qty) DI/AI 映射条目算出可以覆盖它们全部的连续 Modbus
+    // 读请求范围 [minAddr, minAddr + qty - 1]。H6 相关：老代码在这里保留了
+    // 一段"if (qty < maxQty) qty = maxQty" 的死代码 —— 数学上 qty = maxAddr
+    // - minAddr + 1 已经 ≥ 任何单个条目的 qty，不需要 fallback。
+    // 返回 (minAddr, qty)；输入空则返回 (0, 0)。
+    // 见 tests/test_modbus_master_addr_span.cxx。
+    struct AddrSpan { uint16_t minAddr = 0; uint16_t qty = 0; };
+    template <typename ItemIter>
+    static AddrSpan ComputeAddrSpan(ItemIter begin, ItemIter end) {
+        if (begin == end) return {};
+        uint16_t lo = 0xFFFF;
+        uint16_t hi = 0;
+        for (auto it = begin; it != end; ++it) {
+            uint16_t addr = it->addr;
+            uint16_t q    = it->qty;
+            if (addr < lo) lo = addr;
+            uint16_t last = static_cast<uint16_t>(addr + q - 1);
+            if (last > hi) hi = last;
+        }
+        if (lo == 0xFFFF) return {};
+        AddrSpan s;
+        s.minAddr = lo;
+        s.qty     = static_cast<uint16_t>(hi - lo + 1);
+        return s;
+    }
+
 private:
     // ── 配置解析 ──
     bool ParseGlobal(const std::string& key, const std::string& val);

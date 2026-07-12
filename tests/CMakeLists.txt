@@ -233,6 +233,9 @@ add_pmpc_test(test_iec104_slave_thread_cleanup test_iec104_slave_thread_cleanup.
 # H9: Modbus AO epsilon 修复回归（AoAlmostEqual 已 inline）
 add_pmpc_test(test_modbus_ao_epsilon test_modbus_ao_epsilon.cxx)
 
+# H6: Modbus master 地址范围合并（ComputeAddrSpan 已 inline template）
+add_pmpc_test(test_modbus_master_addr_span test_modbus_master_addr_span.cxx)
+
 # H5: iec104_slave 遥控 fallback 修复回归（DecideRemoteControlTargets 已 inline）
 add_pmpc_test(test_iec104_slave_remote_ctrl test_iec104_slave_remote_ctrl.cxx)
 

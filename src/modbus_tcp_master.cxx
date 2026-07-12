@@ -1004,17 +1004,18 @@ bool ModbusTcpMaster::ReadAndDispatch(socket& sock, uint16_t transId,
     {
         if (diIndices.empty()) return true;
         uint16_t minAddr = 0xFFFF, maxAddr = 0;
-        uint16_t maxQty = 0;
         for (auto idx : diIndices)
         {
             auto& di = dev.diList[idx];
             if (di.addr < minAddr) minAddr = di.addr;
             uint16_t end = static_cast<uint16_t>(di.addr + di.qty - 1);
-            if (end > maxAddr) { maxAddr = end; maxQty = di.qty; }
+            if (end > maxAddr) maxAddr = end;
         }
         if (minAddr == 0xFFFF) return true;
+        // H6 修复：从 minAddr 到 maxAddr 的连续区间即完整覆盖范围；老代码
+        // 里 `if (qty < maxQty) qty = maxQty;` 是死代码 —— qty = maxAddr -
+        // minAddr + 1 已经 ≥ 任何单条 di 的 qty（数学上必然如此）。删掉。
         uint16_t qty = static_cast<uint16_t>(maxAddr - minAddr + 1);
-        if (qty < maxQty) qty = maxQty;
 
         // 发送请求
         uint8_t pdu[] = {
