@@ -45,6 +45,7 @@ test_modbus_ao_epsilon          | test_modbus_ao_epsilon.cxx          |
 test_modbus_master_addr_span    | test_modbus_master_addr_span.cxx    |
 test_redundancy_loadconfig      | test_redundancy_loadconfig.cxx      | src/redundancy.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/socket.cpp
 test_pemp_server_stop_lifecycle | test_pemp_server_stop_lifecycle.cxx | src/pemp_server.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/socket.cpp
+test_iec101_slave_framing       | test_iec101_slave_framing.cxx       |
 #
 # === Phase 3: 协议主站测试 (待添加) ===
 #

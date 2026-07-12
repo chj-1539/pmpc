@@ -40,6 +40,27 @@ public:
     Iec101Slave(); ~Iec101Slave();
     bool LoadConfig(const std::string& path); bool Start(); void Stop();
     bool IsRunning() const { return running_; }
+
+    // IEC101 帧完整性判定（L11 修复）。抽成 inline 静态，方便直接测。
+    // 固定帧: [START_FIX=0x10, CTRL, ADDR, CS, END=0x16] 恰 5 字节。
+    static inline bool IsCompleteFixedFrame(const uint8_t* buf, size_t pos) {
+        constexpr uint8_t START_FIX = 0x10;
+        constexpr uint8_t END       = 0x16;
+        return pos == 5 && buf[0] == START_FIX && buf[4] == END;
+    }
+    // 可变帧（pmpc 简化格式）: [START_VAR, LEN, payload..., END]
+    // 老代码判定 `pos >= buf[1] + 2 && buf[pos-1] == END`。L11 修复：额外
+    // 要求 buf[1] >= 4 —— 长度字段至少要能容纳 CTRL(1) + ADDR(2) + CS(1)，
+    // 否则是明显的畸形帧（buf[1]=0 会让 pos>=2 的极短噪声流被误判）。
+    static inline bool IsCompleteVariableFrame(const uint8_t* buf, size_t pos) {
+        constexpr uint8_t START_VAR = 0x68;
+        constexpr uint8_t END       = 0x16;
+        if (pos < 4)                 return false;
+        if (buf[0] != START_VAR)     return false;
+        if (buf[1] < 4)              return false;   // L11: 长度字段下限
+        if (pos < static_cast<size_t>(buf[1]) + 2) return false;
+        return buf[pos-1] == END;
+    }
 private:
     void PortThread();
     void HandleFrame(CommIO& io, const uint8_t* buf, size_t len);

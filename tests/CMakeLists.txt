@@ -258,6 +258,9 @@ add_pmpc_test(test_pemp_server_stop_lifecycle test_pemp_server_stop_lifecycle.cx
     ${CMAKE_SOURCE_DIR}/src/socket.cpp
 )
 
+# L11: iec101_slave 帧完整性判定（IsCompleteFixedFrame/VariableFrame 已 inline）
+add_pmpc_test(test_iec101_slave_framing test_iec101_slave_framing.cxx)
+
 # H5: iec104_slave 遥控 fallback 修复回归（DecideRemoteControlTargets 已 inline）
 add_pmpc_test(test_iec104_slave_remote_ctrl test_iec104_slave_remote_ctrl.cxx)
 

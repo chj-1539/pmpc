@@ -231,8 +231,9 @@ void Iec101Slave::PortThread() {
             } catch (...) { break; }
             if (pos == 0 && byte != IEC101_START_VAR && byte != IEC101_START_FIX) continue;
             buf[pos++] = byte;
-            if (buf[0] == IEC101_START_FIX && pos == 5 && buf[4] == IEC101_END) { HandleFrame(io, buf, pos); pos = 0; }
-            else if (buf[0] == IEC101_START_VAR && pos >= 4 && pos >= (size_t)buf[1] + 2 && buf[pos-1] == IEC101_END) { HandleFrame(io, buf, pos); pos = 0; }
+            if      (IsCompleteFixedFrame(buf, pos))    { HandleFrame(io, buf, pos); pos = 0; }
+            else if (IsCompleteVariableFrame(buf, pos)) { HandleFrame(io, buf, pos); pos = 0; }
+            else if (pos >= MAX_FRAME)                  { pos = 0; }   // 缓冲区溢出保护
         }
         try { io.close(); } catch (...) {}
         std::cout << "[Iec101Slave] " << config_.portName << " disconnected" << std::endl;
