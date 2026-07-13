@@ -35,6 +35,12 @@ public:
     /// 当前待上传数量
     size_t PendingCount() const;
 
+    /// 设置队列上限。超过上限时 Push 丢弃最老事件（默认 0 = 无限制）。
+    /// P2-2（第二轮）：当 PempServer 未连主站时，DI 高频翻转会无限入队，
+    /// 长时间运行后耗尽内存。
+    void SetMaxSize(size_t max) { maxSize_ = max; }
+    size_t GetMaxSize() const { return maxSize_; }
+
     /// 清空全部
     void Clear();
 
@@ -44,6 +50,7 @@ public:
 private:
     mutable std::mutex mtx_;
     std::deque<SOEEvent> events_;     // 待上传队列（按插入顺序）
+    size_t maxSize_ = 0;             // P2-2: 0 = 无限制
 };
 
 /// 全局 SOE 队列实例（供线程共享）

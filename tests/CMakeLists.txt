@@ -313,6 +313,26 @@ add_pmpc_test(test_iec103_master_frame test_iec103_master_frame.cxx)
 # BuildFixedAck + CalcCS 已 inline，测试零依赖
 add_pmpc_test(test_iec101_slave_send_ack test_iec101_slave_send_ack.cxx)
 
+# RD-1..RD-5 (第二轮): Redundancy 稳定性回归 (tie-breaker + atomic)
+add_pmpc_test(test_redundancy_stability test_redundancy_stability.cxx
+    ${CMAKE_SOURCE_DIR}/src/redundancy.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_data_mgr.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_config_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/ini_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/soe_queue.cxx
+    ${CMAKE_SOURCE_DIR}/src/protocol.cxx
+    ${CMAKE_SOURCE_DIR}/src/socket.cpp
+)
+
+# DC-1 + DC-3 (第二轮): DebugConsole AutoTask race + ClientThread done cleanup
+add_pmpc_test(test_debug_console_race test_debug_console_race.cxx
+    ${CMAKE_SOURCE_DIR}/src/socket.cpp
+)
+
+# PS-1 (第二轮): PempServer Quantize NaN/Inf 防御回归
+# 只测 C++ std::isfinite 语义，零依赖
+add_pmpc_test(test_pemp_server_quantize_nan test_pemp_server_quantize_nan.cxx)
+
 # C1: iec104_slave 客户端注册（ClientThread 应把自己 push 进 clients_）
 add_pmpc_test(test_iec104_slave_client_registration test_iec104_slave_client_registration.cxx
     ${CMAKE_SOURCE_DIR}/src/iec104_slave.cxx

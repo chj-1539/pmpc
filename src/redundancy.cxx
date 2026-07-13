@@ -118,7 +118,9 @@ bool ParseSyncFrame(const uint8_t* d, size_t len, ChangeEvent& ev)
 
 RedundRole DecideRole(RedundRole role, RedundRole peerRole, bool peerAlive,
                       int missedHeartbeats, int missedLimit,
-                      uint16_t localPriority, uint16_t peerPriority)
+                      uint16_t localPriority, uint16_t peerPriority,
+                      const std::string& localTieBreaker,
+                      const std::string& peerTieBreaker)
 {
     if (!peerAlive) {
         if (missedHeartbeats >= missedLimit &&
@@ -127,15 +129,28 @@ RedundRole DecideRole(RedundRole role, RedundRole peerRole, bool peerAlive,
         }
         return role;
     }
+    // RD-1（第二轮）: priority 相等时的 tie-break 助手。
+    // 语义: localTieBreaker < peerTieBreaker 视为本机"更小"→ 升主。
+    // 若两者都为空（旧调用兼容），退化为"留 Standby"避免双主。
+    auto localWinsTie = [&]() -> bool {
+        if (localTieBreaker.empty() || peerTieBreaker.empty()) return false;
+        return localTieBreaker < peerTieBreaker;
+    };
     // peerAlive
     if (role == RedundRole::Idle) {
         if (peerRole == RedundRole::Master) return RedundRole::Standby;
-        // 两个 Idle 或 Idle+Standby：优先级高升主，等优先级留 Standby 避免双主
-        return (localPriority > peerPriority) ? RedundRole::Master : RedundRole::Standby;
+        // 两个 Idle 或 Idle+Standby：
+        //   本机 priority 严格高 → Master；严格低 → Standby；
+        //   相等 → tie-break（避免旧逻辑双 Standby 永不 failover）
+        if (localPriority > peerPriority) return RedundRole::Master;
+        if (localPriority < peerPriority) return RedundRole::Standby;
+        return localWinsTie() ? RedundRole::Master : RedundRole::Standby;
     }
     if (role == RedundRole::Master && peerRole == RedundRole::Master) {
-        // 双主检测：本地优先级严格低才降级；等优先级维持 Master 由通信另一端降
+        // 双主检测：本地优先级严格低才降级；等优先级由 tie-break 决定谁降。
         if (localPriority < peerPriority) return RedundRole::Standby;
+        if (localPriority == peerPriority && !localWinsTie())
+            return RedundRole::Standby;
     }
     return role;
 }
@@ -193,9 +208,22 @@ void SyncChannel::RecvLoop(socket s,socket_addr){
             uint16_t dl16=(uint16_t)dl;size_t tl=(size_t)dl16+5;
             if(tl>sizeof(buf))continue;
             size_t r=tl-4,t=0;while(t<r){n=s.recv(buf+4+t,r-t);if(n==0)break;t+=n;}
+            if (t < r) {
+                // recv 返回 0 表示对端 close，此时 close 本地并重连
+                try{s.close();}catch(...){}
+                continue;
+            }
             ChangeEvent ev;
             if(ParseSyncFrame(buf,tl,ev)&&callback_)callback_(ev);
-        }catch(const socket_error&e){
+        }catch(const socket_error& e){
+            // RD-3（第二轮）: 老代码任何 socket_error 都 close + 重连 —— 500ms
+            // recv timeout（空闲期没同步数据）也算异常 → 每 500ms 自我断连
+            // 重连一次，Master 端 AcceptLoop 也不断 accept 新连接，实际数据
+            // 送达时因刚断开会丢帧。这是自 DoS。改为：只在真正断连（closed）
+            // 时 close 重连；timeout 继续下一轮 recv。
+            if (e.code() == socket_errc::timeout) {
+                continue;   // 空闲期，继续等
+            }
             std::cerr<<"[Sync] disconnect: "<<e.what()<<std::endl;
             try{s.close();}catch(...){}
         }
@@ -278,15 +306,31 @@ void RedundancyManager::Stop(){
 void RedundancyManager::HeartbeatLoop(){
     while(running_){
         if(NowMs()<startupCompleteTime_){std::this_thread::sleep_for(std::chrono::milliseconds(200));continue;}
-        {
-            std::lock_guard<std::mutex> lock(hbMtx_);
-            if(!running_) break;
-            if(!hbSendSock_.is_open()){
-                try{hbSendSock_.connect(peerIp_,heartbeatPort_);hbSendSock_.set_recv_timeout(std::chrono::milliseconds(500));
-                    std::cout<<"[Redundancy] hb connected -> "<<peerIp_<<":"<<heartbeatPort_<<std::endl;}
-                catch(...){/* 连接失败，由外层循环定时重试 */ try{hbSendSock_.close();}catch(...){} }
+        // RD-2（第二轮）: 老代码在 hbMtx_ 内做 hbSendSock_.connect(...) —— TCP
+        // SYN 超时 Windows 默认 21s，其间 Stop() 拿不到 hbMtx_ 也就 close 不
+        // 掉 socket，整个模块 join 卡死。改为：先在锁外用局部 socket connect，
+        // 成功后短临界区 swap，失败则丢弃继续下轮重试。
+        if(!hbSendSock_.is_open()){
+            socket tryConn;
+            bool ok = false;
+            try {
+                tryConn.connect(peerIp_, heartbeatPort_);
+                tryConn.set_recv_timeout(std::chrono::milliseconds(500));
+                ok = true;
+            } catch(...) { /* 连接失败，继续等下轮 */ }
+            if (ok) {
+                std::lock_guard<std::mutex> lock(hbMtx_);
+                if (!running_) break;
+                // 双检查：其他线程可能已经在锁内 close 了；这里覆盖
+                try { hbSendSock_.close(); } catch(...) {}
+                hbSendSock_ = std::move(tryConn);
+                std::cout<<"[Redundancy] hb connected -> "<<peerIp_<<":"<<heartbeatPort_<<std::endl;
             }
-            if(hbSendSock_.is_open()) try{
+        }
+        if (hbSendSock_.is_open()) {
+            std::lock_guard<std::mutex> lock(hbMtx_);
+            if (!running_) break;
+            if (hbSendSock_.is_open()) try{
                 // 修复 C4：心跳里携带本机 priority，对端 ListenLoop 可解析并
                 // 存入 peerPriority_，供 CheckFailover 双主/等优先决策。
                 auto f = pmpc::redundancy::BuildHeartbeatFrame(
@@ -305,10 +349,36 @@ void RedundancyManager::ListenLoop(){
     while(running_){
         try{socket_addr p;socket c=hbListenSock_.accept(&p);
             std::cout<<"[Redundancy] hb from: "<<p.to_string()<<std::endl;
+            // RD-4（第二轮）: 老代码 c.recv 阻塞无超时 —— 对端优雅停机（关连
+            // 接但不发 RST）时 recv 永远等，peerAlive_ 也永远 true → 不检测
+            // 出 dead，从站永不 failover。加 recv timeout 让循环定期醒来
+            // 检查 running_ 与 lastHbTime_。
+            try { c.set_recv_timeout(std::chrono::milliseconds(500)); } catch(...) {}
             while(running_){
                 // 先读 START+FUN+LEN(2)，再依 LEN 读剩余；兼容老 14 字节 / 新 16 字节
                 uint8_t hdr[4]; size_t t=0;
-                while(t<4){size_t n=c.recv(hdr+t,4-t);if(n==0)break;t+=n;}
+                bool timedOut = false;
+                try {
+                    while(t<4){size_t n=c.recv(hdr+t,4-t);if(n==0)break;t+=n;}
+                } catch (const socket_error& e) {
+                    if (e.code() == socket_errc::timeout) { timedOut = true; }
+                    else { break; }
+                }
+                if (timedOut) {
+                    // RD-4: peer 静默期 —— 累计到 missedHeartbeatLimit 视为掉线
+                    uint64_t nowMs = NowMs();
+                    if (lastHbTime_ != 0 &&
+                        nowMs - lastHbTime_ >
+                            static_cast<uint64_t>(missedHeartbeatLimit_) *
+                            static_cast<uint64_t>(heartbeatIntervalMs_)) {
+                        if (peerAlive_.load()) {
+                            peerAlive_ = false;
+                            std::cout<<"[Redundancy] peer silent, mark offline"<<std::endl;
+                            CheckFailover();
+                        }
+                    }
+                    continue;   // 继续等下一帧
+                }
                 if(t<4)break;
                 unsigned dl = static_cast<unsigned>(hdr[2]) |
                               (static_cast<unsigned>(hdr[3]) << 8);
@@ -316,7 +386,10 @@ void RedundancyManager::ListenLoop(){
                 size_t tail = (dl == 8) ? 10 : 12;    // ROLE+TS(+PRI) + END
                 uint8_t buf[32];
                 std::memcpy(buf, hdr, 4);
-                t=0;while(t<tail){size_t n=c.recv(buf+4+t,tail-t);if(n==0)break;t+=n;}
+                t=0;
+                try {
+                    while(t<tail){size_t n=c.recv(buf+4+t,tail-t);if(n==0)break;t+=n;}
+                } catch (const socket_error&) { break; }
                 if(t<tail)break;
                 size_t total = 4 + tail;
 
@@ -325,6 +398,7 @@ void RedundancyManager::ListenLoop(){
                     missedHeartbeats_ = 0;
                     peerRole_    = info.role;
                     peerPriority_ = info.priority;
+                    lastHbTime_ = NowMs();
                     if(!peerAlive_){peerAlive_=true;std::cout<<"[Redundancy] peer online"<<std::endl;}
                     CheckFailover();
                 }
@@ -340,7 +414,15 @@ void RedundancyManager::CheckFailover(){
     RedundRole next = pmpc::redundancy::DecideRole(
         role_.load(), peerRole_.load(), peerAlive_.load(),
         missedHeartbeats_, missedHeartbeatLimit_,
-        static_cast<uint16_t>(priority_), peerPriority_);
+        static_cast<uint16_t>(priority_), peerPriority_,
+        // RD-1（第二轮）: 等优先级时用 (localName, peerIp) 打破死锁。
+        // 【局限】当前心跳帧不承载对端 name，这里传入的两个字符串不构成
+        // 对偶（A 传 (nameA, ipB)，B 传 (nameB, ipA)），tie-break 可能双方
+        // 都 Standby（保守行为，比双 Master 安全）。彻底修需扩展心跳帧格式
+        // 加对端 name，或让运维保证 priority 各机不同。至少这个"保守双
+        // Standby"比老代码"永不 failover 且双方都 Standby"改进了双 Master
+        // 场景（双 Master 时低者会主动降）。
+        localName_, peerIp_);
     if (next != role_.load()) {
         if (role_.load() == RedundRole::Master && next == RedundRole::Standby)
             std::cerr<<"[Redundancy] 双主检测，本站降级"<<std::endl;

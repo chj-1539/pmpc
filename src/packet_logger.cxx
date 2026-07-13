@@ -261,6 +261,11 @@ void PacketLogger::Log(PktDir dir, uint16_t ch, uint16_t dev,
 
     std::string dateStr = CurrentDateStr();
     std::string path = LogFilePath(ch, dev);
+    // PacketLogger 日切（第二轮）修复：files_ 的 key 原来是完整路径（含日期），
+    // 日切时 LogFilePath 返回新路径 → 找不到旧 entry → 建新 entry → old stream
+    // 永远不关闭。文件句柄按天累积，最终耗尽 FD。改为 key = "ch{ch}_dev{dev}"
+    // （日期无关），当 dateStr 不匹配时 close 旧句柄并 reopen 新路径。
+    std::string key = "ch" + std::to_string(ch) + "_dev" + std::to_string(dev);
 
     // ── 自动解析 ──
     std::string parse;
@@ -289,14 +294,14 @@ void PacketLogger::Log(PktDir dir, uint16_t ch, uint16_t dev,
 
     // ── 写文件 ──
     std::lock_guard<std::mutex> lock(fileMtx_);
-    auto it = files_.find(path);
+    auto it = files_.find(key);
     if (it == files_.end() || !it->second.stream.is_open()) {
         FileEntry fe;
         fe.dateStr = dateStr;
         fe.stream.open(path, std::ios::app);
         if (!fe.stream.is_open()) return;
-        files_[path] = std::move(fe);
-        it = files_.find(path);
+        files_[key] = std::move(fe);
+        it = files_.find(key);
     }
 
     auto& file = it->second.stream;
@@ -305,6 +310,7 @@ void PacketLogger::Log(PktDir dir, uint16_t ch, uint16_t dev,
     if (it->second.dateStr != dateStr) {
         file.close();
         it->second.dateStr = dateStr;
+        path = LogFilePath(ch, dev);    // 重新生成含新日期的路径
         file.open(path, std::ios::app);
         if (!file.is_open()) return;
     }

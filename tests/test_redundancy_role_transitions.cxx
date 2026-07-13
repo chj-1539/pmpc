@@ -90,12 +90,43 @@ TEST(RedundancyRoleTest, DualMasterHigherPriorityKeepsMaster) {
               static_cast<int>(RedundRole::Master));
 }
 
-TEST(RedundancyRoleTest, DualMasterEqualPriorityBothKeepMaster) {
-    // 等 priority 的双主一方不会主动降级（要么由 priority 决胜、要么外部干预）
-    // —— 记录当前行为，避免误改
+TEST(RedundancyRoleTest, DualMasterEqualPriorityWithoutTieBreakerDemotes) {
+    // RD-1（第二轮）语义变更：等 priority 且没有 tie-breaker 时，本机不
+    // 再"维持 Master"（旧行为容易导致真的双主，两侧都不降级）。改为
+    // localWinsTie() 返回 false → 降 Standby。让运维必须显式配置本机名
+    // 与对端名（或让部署时用不同 priority）来避免双 Standby。
     EXPECT_EQ(static_cast<int>(DecideRole(
                   RedundRole::Master, RedundRole::Master, true, 0, 5, 100, 100)),
+              static_cast<int>(RedundRole::Standby));
+}
+
+TEST(RedundancyRoleTest, DualMasterEqualPriorityTieBreakerLocalWinsKeepsMaster) {
+    // 等 priority + tie-breaker 让本机赢 → 保持 Master
+    EXPECT_EQ(static_cast<int>(DecideRole(
+                  RedundRole::Master, RedundRole::Master, true, 0, 5, 100, 100,
+                  /*localTie*/"a", /*peerTie*/"b")),
               static_cast<int>(RedundRole::Master));
+}
+
+TEST(RedundancyRoleTest, DualMasterEqualPriorityTieBreakerLocalLosesDemotes) {
+    // 等 priority + tie-breaker 让本机输 → 降 Standby
+    EXPECT_EQ(static_cast<int>(DecideRole(
+                  RedundRole::Master, RedundRole::Master, true, 0, 5, 100, 100,
+                  /*localTie*/"z", /*peerTie*/"a")),
+              static_cast<int>(RedundRole::Standby));
+}
+
+TEST(RedundancyRoleTest, DoubleIdleEqualPriorityTieBreakerLocalWinsBecomesMaster) {
+    // RD-1 核心场景：两个 Idle 等 priority，旧代码双方都 Standby → 永不 failover。
+    // 新逻辑 tie-breaker 决胜 → 一升 Master 一 Standby。
+    EXPECT_EQ(static_cast<int>(DecideRole(
+                  RedundRole::Idle, RedundRole::Idle, true, 0, 5, 100, 100,
+                  "box_a", "box_b")),
+              static_cast<int>(RedundRole::Master));
+    EXPECT_EQ(static_cast<int>(DecideRole(
+                  RedundRole::Idle, RedundRole::Idle, true, 0, 5, 100, 100,
+                  "box_b", "box_a")),
+              static_cast<int>(RedundRole::Standby));
 }
 
 // ---- 稳定状态（本机 Standby，peer 是 Master）----

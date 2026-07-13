@@ -158,6 +158,7 @@ void DebugConsole::Stop()
         for (auto& t : clientThreads_)
             if (t.joinable()) t.join();
         clientThreads_.clear();
+        clientDoneFlags_.clear();
     }
 
     std::cout << "[DebugConsole] 调试控制台已停止" << std::endl;
@@ -179,20 +180,39 @@ void DebugConsole::AcceptLoop(const BindConfig& bind, socket& listenSock)
 
             {
                 std::lock_guard<std::mutex> lock(clientMtx_);
-                // 定期清理已退出的客户端线程，避免累积
+                // DC-3（第二轮）修复：老代码每 10 次 detach() 已在跑的
+                // ClientThread（joinable() 对未 join 的活线程也是 true！），
+                // Stop() 只 join 剩下的 → 被 detach 的线程仍在用 this，
+                // DebugConsole 析构后 UAF。改为按 shared_ptr<atomic<bool>>
+                // done 标志（同 iec104_slave M4 模式）：ClientThread 完成
+                // 前置位 done，cleanup 只 join+erase done=true 的。
                 if (++cleanupCnt_ % 10 == 0) {
-                    for (auto it = clientThreads_.begin(); it != clientThreads_.end(); ) {
-                        if (it->joinable()) { it->detach(); it = clientThreads_.erase(it); }
-                        else ++it;
+                    for (size_t i = 0; i < clientDoneFlags_.size(); ) {
+                        if (clientDoneFlags_[i]->load(std::memory_order_acquire)) {
+                            if (clientThreads_[i].joinable())
+                                clientThreads_[i].join();
+                            clientThreads_.erase(clientThreads_.begin() + i);
+                            clientDoneFlags_.erase(clientDoneFlags_.begin() + i);
+                        } else {
+                            ++i;
+                        }
                     }
                 }
-                clientThreads_.emplace_back(&DebugConsole::ClientThread, this, std::move(client));
+                auto doneFlag = std::make_shared<std::atomic<bool>>(false);
+                clientThreads_.emplace_back(
+                    &DebugConsole::ClientThread, this, std::move(client), doneFlag);
+                clientDoneFlags_.push_back(doneFlag);
             }
 
-        } catch (const socket_error&) {
-            if (running_)
-                std::cerr << "[DebugConsole] Accept 错误" << std::endl;
-            break;
+        } catch (const socket_error& e) {
+            // DC-2（第二轮）修复：老代码任意 accept 抛异常直接 break —— 瞬
+            // 态错误 / EINTR / fd 意外都会永久终止监听，running_ 仍 true 但
+            // 无法再连接调试台，只能重启进程。改为 running_==false 才 break，
+            // 其他情况 log + 短 sleep 后 continue。
+            if (!running_) break;
+            std::cerr << "[DebugConsole] Accept 错误: " << e.what()
+                      << "（500ms 后重试）" << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     }
 }
@@ -230,8 +250,16 @@ void DebugConsole::PrintBanner(socket& sock)
 
 // ==================== 客户端线程 ====================
 
-void DebugConsole::ClientThread(socket clientSock)
+void DebugConsole::ClientThread(socket clientSock,
+                                 std::shared_ptr<std::atomic<bool>> done)
 {
+    // DC-3 修复：任何退出路径都要置位 done，让 AcceptLoop 的 cleanup 能
+    // join + erase。用 lambda scope guard，含异常路径。
+    struct DoneGuard {
+        std::atomic<bool>* d;
+        ~DoneGuard() { if (d) d->store(true, std::memory_order_release); }
+    } guard{done.get()};
+
     if (verbose_ >= 1) {
         std::cout << "[DebugConsole] 客户端接入 (port=" << port_ << ")" << std::endl;
     }
@@ -739,19 +767,43 @@ int DebugConsole::CreateAutoTask(AutoTask::Type type, uint16_t ch,
     task->dev = dev;
     task->pt = pt;
     task->intervalMs = intervalMs;
-
     int id = task->id;
 
-    if (type == AutoTask::DI_TOGGLE) {
-        task->thr = std::thread(&DebugConsole::AutoToggleThread, this,
-                                id, ch, dev, pt, intervalMs);
-    } else {
-        task->thr = std::thread(&DebugConsole::AutoSweepThread, this,
-                                id, ch, dev, pt, intervalMs);
+    // DC-1（第二轮）修复：先 push 进 autoTasks_ 拿到 stopFlag 稳定地址，
+    // 再启动线程。之前是"先 start thread、再 push"，线程首轮进入循环
+    // 遍历 autoTasks_ 找自己 thread::id，若 push 慢一步 → found=false →
+    // 立即 return，任务空转，用户看到"auto di 已启动"实际从不变位。
+    // stopFlag 是 atomic<bool>，push_back 后 unique_ptr 里的 AutoTask 地址
+    // 稳定（不会因 vector 扩容失效）—— unique_ptr 保存的是堆对象指针。
+    std::atomic<bool>* stopFlagPtr = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(autoMtx_);
+        stopFlagPtr = &task->stopFlag;
+        autoTasks_.push_back(std::move(task));
     }
-
-    std::lock_guard<std::mutex> lock(autoMtx_);
-    autoTasks_.push_back(std::move(task));
+    // 此时 stopFlagPtr 稳定指向堆上的 atomic<bool>，锁外启动线程安全。
+    // 我们要把 thr 也赋给对应的 unique_ptr 里 —— 再进锁找回它。
+    std::thread t;
+    if (type == AutoTask::DI_TOGGLE) {
+        t = std::thread(&DebugConsole::AutoToggleThread, this,
+                        stopFlagPtr, ch, dev, pt, intervalMs);
+    } else {
+        t = std::thread(&DebugConsole::AutoSweepThread, this,
+                        stopFlagPtr, ch, dev, pt, intervalMs);
+    }
+    {
+        std::lock_guard<std::mutex> lock(autoMtx_);
+        // 用 stopFlag 地址反查同一个 task，把 thread 赋进去
+        for (auto& tp : autoTasks_) {
+            if (&tp->stopFlag == stopFlagPtr) {
+                tp->thr = std::move(t);
+                break;
+            }
+        }
+    }
+    // 若上面反查失败（理论不应发生），thread 会在此处 join/detach 时炸。
+    // 但 std::thread 析构未 join/detach = terminate；为容错兜底 detach。
+    if (t.joinable()) t.detach();
     return id;
 }
 
@@ -768,23 +820,13 @@ bool DebugConsole::StopAutoTask(int id)
     return true;
 }
 
-void DebugConsole::AutoToggleThread(int /*taskId*/, uint16_t ch, uint16_t dev,
+void DebugConsole::AutoToggleThread(std::atomic<bool>* stopFlag,
+                                     uint16_t ch, uint16_t dev,
                                      uint16_t pt, int intervalMs)
 {
     while (running_) {
-        {
-            std::lock_guard<std::mutex> lock(autoMtx_);
-            // 检查任务是否已被删除
-            bool found = false;
-            for (auto& t : autoTasks_) {
-                if (t->thr.get_id() == std::this_thread::get_id()) {
-                    found = true;
-                    if (t->stopFlag) return;
-                    break;
-                }
-            }
-            if (!found) return;
-        }
+        // DC-1 修复：直接看 stopFlag，不再遍历 autoTasks_ 找自己
+        if (stopFlag->load(std::memory_order_acquire)) return;
 
         DiPoint p;
         RemoteDataMgr::Instance().GetDi(ch, dev, pt, p);
@@ -793,28 +835,21 @@ void DebugConsole::AutoToggleThread(int /*taskId*/, uint16_t ch, uint16_t dev,
             std::chrono::system_clock::now().time_since_epoch()).count();
         RemoteDataMgr::Instance().SetDi(ch, dev, pt, newVal, now, true);
 
-        for (int i = 0; i < intervalMs / 100 && running_; i++)
+        for (int i = 0; i < intervalMs / 100 && running_; i++) {
+            if (stopFlag->load(std::memory_order_acquire)) return;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     }
 }
 
-void DebugConsole::AutoSweepThread(int /*taskId*/, uint16_t ch, uint16_t dev,
+void DebugConsole::AutoSweepThread(std::atomic<bool>* stopFlag,
+                                    uint16_t ch, uint16_t dev,
                                     uint16_t pt, int intervalMs)
 {
     double phase = 0.0;
     while (running_) {
-        {
-            std::lock_guard<std::mutex> lock(autoMtx_);
-            bool found = false;
-            for (auto& t : autoTasks_) {
-                if (t->thr.get_id() == std::this_thread::get_id()) {
-                    found = true;
-                    if (t->stopFlag) return;
-                    break;
-                }
-            }
-            if (!found) return;
-        }
+        // DC-1 修复：同 AutoToggleThread
+        if (stopFlag->load(std::memory_order_acquire)) return;
 
         // 0~100 正弦波
         double val = 50.0 + 50.0 * std::sin(phase);
@@ -822,8 +857,10 @@ void DebugConsole::AutoSweepThread(int /*taskId*/, uint16_t ch, uint16_t dev,
         phase += 0.1;
         if (phase > 2.0 * M_PI) phase -= 2.0 * M_PI;
 
-        for (int i = 0; i < intervalMs / 100 && running_; i++)
+        for (int i = 0; i < intervalMs / 100 && running_; i++) {
+            if (stopFlag->load(std::memory_order_acquire)) return;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     }
 }
 

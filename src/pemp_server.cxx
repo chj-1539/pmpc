@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <mutex>
 #include <set>
+#include <cmath>
 
 // 前置声明：这些 static helper 定义在文件下半部（与 do_upload_di/ai 语义
 // 相关），但 handle_call_telemetry / do_upload_ai 都会用。
@@ -138,6 +139,7 @@ void PempServer::stop()
         for (auto& t : clientThreads_)
             if (t.joinable()) t.join();
         clientThreads_.clear();
+        clientDoneFlags_.clear();
     }
 }
 
@@ -145,6 +147,7 @@ void PempServer::stop()
 
 void PempServer::accept_loop(const PempBind& bind, socket& listen_sock)
 {
+    int cleanupCnt = 0;
     while (running_)
     {
         try {
@@ -160,9 +163,27 @@ void PempServer::accept_loop(const PempBind& bind, socket& listen_sock)
             std::cout << "[PempServer] 主机接入: "
                       << peer.to_string() << std::endl;
             {
+                // PS-3（第二轮）：为每个客户端创建 done 标志；每 10 次 accept
+                // 清理一次已退出客户端线程，避免 clientThreads_ 无限增长
+                // （老代码只 emplace_back 从不清除）。
                 std::lock_guard<std::mutex> lock(clientMtx_);
+                if (++cleanupCnt % 10 == 0) {
+                    for (size_t i = 0; i < clientThreads_.size(); ) {
+                        if (clientDoneFlags_.size() > i &&
+                            clientDoneFlags_[i]->load(std::memory_order_acquire)) {
+                            if (clientThreads_[i].joinable())
+                                clientThreads_[i].join();
+                            clientThreads_.erase(clientThreads_.begin() + i);
+                            clientDoneFlags_.erase(clientDoneFlags_.begin() + i);
+                        } else {
+                            ++i;
+                        }
+                    }
+                }
+                auto done = std::make_shared<std::atomic<bool>>(false);
+                clientDoneFlags_.push_back(done);
                 clientThreads_.emplace_back(&PempServer::client_handler, this,
-                    std::move(client), peer);
+                    std::move(client), peer, std::move(done));
             }
         }
         catch (const socket_error& e) {
@@ -175,8 +196,16 @@ void PempServer::accept_loop(const PempBind& bind, socket& listen_sock)
 
 // ==================== 客户端消息循环 ====================
 
-void PempServer::client_handler(socket client, socket_addr peer)
+void PempServer::client_handler(socket client, socket_addr peer,
+                                 std::shared_ptr<std::atomic<bool>> done)
 {
+    // PS-3（第二轮）：RAII guard —— 任何退出路径（含异常）置位 done，
+    // 让 accept_loop 的 cleanup 知道本线程已退出，可 join+erase。
+    struct DoneGuard {
+        std::atomic<bool>* d;
+        ~DoneGuard() { if (d) d->store(true, std::memory_order_release); }
+    } guard{done.get()};
+
     // ── 连接级工作状态 ──
     uint8_t  workState   = STATE_SELF_CHECK_OK | STATE_IS_MASTER;
     bool     waitingAck  = false;
@@ -533,7 +562,38 @@ void PempServer::handle_sync_clock(const std::vector<uint8_t>& frame,
     }
 
     CP56time2a remoteTime = FrameParser::ReadCP56(frame, 0);
-    (void)remoteTime;
+
+    // PS-2（第二轮）修复：老代码 `(void)remoteTime;` 静默丢弃，主站以为
+    // 时钟已同步但实际上没做任何事。这里加日志 + 配置开关。Windows 上调
+    // SetSystemTime 需要管理员权限，保守不自动执行，留 log 给运维人工核对。
+    if (clockSyncEnable_ && clockSyncVerbose_) {
+        int ms = (int)remoteTime.ms_low | ((int)remoteTime.ms_high << 8);
+        std::cout << "[PempServer] 时钟同步: "
+                  << (int)remoteTime.year + 2000 << "-"
+                  << (int)remoteTime.month << "-"
+                  << (int)remoteTime.day << " "
+                  << (int)remoteTime.hour << ":"
+                  << (int)remoteTime.minute << ":"
+                  << (ms / 1000) << "." << (ms % 1000)
+                  << "（当前仅记录，未实际调用 SetSystemTime）"
+                  << std::endl;
+    } else if (clockSyncEnable_) {
+        // 首次 log 时间
+        static bool firstClock = true;
+        if (firstClock) {
+            firstClock = false;
+            int ms = (int)remoteTime.ms_low | ((int)remoteTime.ms_high << 8);
+            std::cout << "[PempServer] 收到首次时钟同步帧，时间戳: "
+                      << (int)remoteTime.year + 2000 << "-"
+                      << (int)remoteTime.month << "-"
+                      << (int)remoteTime.day << " "
+                      << (int)remoteTime.hour << ":"
+                      << (int)remoteTime.minute << ":"
+                      << (ms / 1000) << "." << (ms % 1000)
+                      << "（clockSyncVerbose_=1 可每次同步时 log）"
+                      << std::endl;
+        }
+    }
 
     auto resp = FrameBuilder::Make1Byte(FunCode::SyncClock, 0xFF);
     send_all(client, resp);
@@ -636,6 +696,14 @@ static int32_t QuantizeAiToInt32Warn(uint16_t chId, uint16_t devNo,
 
     const double kInt32Max = 2147483647.0;   // 2^31 - 1
     const double kInt32Min = -2147483648.0;  // -2^31
+    // PS-1（第二轮）修复：对 NaN 和 Inf 必须显式判 —— `v > kInt32Max` 和
+    // `v < kInt32Min` 对 NaN 都返回 false，会走到底部 static_cast，double→int
+    // 对非 finite 是 UB（MinGW 上通常返回 INT32_MIN，可能崩）。传感器故障
+    // 时 AI 常出 NaN/Inf，必须防御。
+    if (!std::isfinite(v)) {
+        emitOnce("非 finite (NaN/Inf)，返回 0");
+        return 0;
+    }
     if (v > kInt32Max) { emitOnce("超出 int32 上限，已 clamp"); return INT32_MAX; }
     if (v < kInt32Min) { emitOnce("超出 int32 下限，已 clamp"); return INT32_MIN; }
     // 检查是否有 fractional part

@@ -10,6 +10,7 @@
 #include <chrono>
 #include <functional>
 #include <cstdint>
+#include <mutex>
 
 class RedundancyManager;
 
@@ -96,6 +97,10 @@ private:
     int FindModule(const std::string& name) const;
     std::vector<ModuleEntry> entries_;
     std::vector<std::unique_ptr<AppModule>> modules_;
+    // P2（第二轮）：StartModule / StopModule / ReloadModule 三入口并发无锁。
+    // WatchLoop（watch 线程）、冗余回调、debug_console reload 命令可能
+    // 同时操作同一模块。新加 mgrMtx_ 序列化。
+    mutable std::mutex mgrMtx_;
     std::map<std::string, int64_t> fileTimes_;
     std::atomic<bool> running_{false};
     std::thread watchThr_;

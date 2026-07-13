@@ -99,16 +99,22 @@ bool                 ParseSyncFrame(const uint8_t* data, size_t len, ChangeEvent
 //   └─ peerAlive == true ─────────────────────────────────────────────────
 //      若 role == Idle：
 //        peerRole==Master   → Standby
-//        peerRole 其他      → 优先级高的升主，等优先级留 Standby（避免双主）
+//        peerRole 其他      → 优先级高的升主；等优先级用 tie-breaker
+//                             （字典序小的升主，避免双 Standby 死锁）
 //      若 role == Master 且 peerRole == Master：
-//        优先级低的降为 Standby；等优先级维持 Master（保持一方主导）
+//        优先级低的降为 Standby；等优先级用 tie-breaker 决定谁降
 //      其它情况维持
 //
 // 修复 C4：CheckFailover 里对 peerPriority 的引用之前没有心跳字段承载，
 // 现在这个函数明确接收 peerPriority；调用方从 ParseHeartbeatFrame 拿到值。
+// 修复 RD-1（第二轮）：双 Idle 且 priority 相等时旧逻辑双方都 Standby →
+// 永不 failover。新增 localTieBreaker/peerTieBreaker 参数（一般传本机名
+// 与对端 IP），priority 相等时按字典序解。
 RedundRole DecideRole(RedundRole role, RedundRole peerRole, bool peerAlive,
                       int missedHeartbeats, int missedLimit,
-                      uint16_t localPriority, uint16_t peerPriority);
+                      uint16_t localPriority, uint16_t peerPriority,
+                      const std::string& localTieBreaker = "",
+                      const std::string& peerTieBreaker = "");
 
 } // namespace redundancy
 } // namespace pmpc
@@ -187,9 +193,12 @@ private:
     std::atomic<bool> peerAlive_{false};
     std::atomic<RedundRole> role_{RedundRole::Idle};
     std::atomic<RedundRole> peerRole_{RedundRole::Idle};  ///< 对端当前角色（从心跳帧解析）
-    uint16_t peerPriority_{0};          ///< 对端优先级（从心跳帧解析）
+    // RD-5（第二轮）: peerPriority_ / missedHeartbeats_ 都被 HeartbeatLoop
+    // 写 + CheckFailover 读，普通 int/uint16 是数据竞争 UB。改 atomic 让
+    // 存取自身对齐+可见性有保证；DecideRole 传值时 .load()。
+    std::atomic<uint16_t> peerPriority_{0};
+    std::atomic<int> missedHeartbeats_{0};
     RedundRole lastRole_ = RedundRole::Idle;
-    int missedHeartbeats_ = 0;
     uint64_t lastHbTime_ = 0;
     uint64_t startupCompleteTime_ = 0;
     socket hbListenSock_;

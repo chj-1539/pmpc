@@ -68,6 +68,10 @@ bool Iec104Slave::LoadConfig(const std::string& path) {
     }
 
     config_ = SlaveConfig{};
+    // 104S-1（第二轮）修复：binds_ 不是 config_ 的成员，LoadConfig 不清除
+    // 会导致热重载时历史绑定累加（旧配置 + 新配置的 listen_N 全部保留），
+    // 第二次 Start() 时多次 bind 端口冲突或产生幽灵监听。
+    binds_.clear();
     config_.port = ini.GetInt("global", "port", 2404);
     config_.maxClients = ini.GetInt("global", "max_clients", 10);
     config_.verbose = ini.GetInt("global", "verbose", 1);
@@ -568,6 +572,9 @@ bool Iec104Slave::HandleFrame(ClientInfo& ci, const uint8_t* buf, size_t len,
     // Remote control C_SC_NA_1 / C_DC_NA_1
     case IecType::C_SC_NA_1:
     case IecType::C_DC_NA_1: {
+        // 104S-2（第二轮）：最小 ASDU 长度 10（TYPE+VSQ+COT+COA(2)+IOA(3)+SCO）。
+        // 老代码读 `asdu[6..8]` (IOA) 无守卫，攻击者/畸形帧传短 asdu 会读越界。
+        if (asduLen < 10) break;
         if (!currentDev) break;
         uint32_t ioA = static_cast<uint32_t>(asdu[6])
                      | (static_cast<uint32_t>(asdu[7]) << 8)
@@ -607,7 +614,8 @@ bool Iec104Slave::HandleFrame(ClientInfo& ci, const uint8_t* buf, size_t len,
         respAsdu[p++] = static_cast<uint8_t>((coa >> 8) & 0xFF);
         respAsdu[p++] = asdu[6]; respAsdu[p++] = asdu[7]; respAsdu[p++] = asdu[8]; // IOA
         respAsdu[p++] = static_cast<uint8_t>(cmdVal & 0xFF);
-        if (p < asduLen) respAsdu[p++] = asdu[9]; // SE
+        // 注意：asdu[9] = SCO（单命令），无额外 SE 字段。之前这行重复写
+        // asdu[9] 作为 SE 会把 SCO 再写一遍导致应答长度偏 1。已清除。
         SendIFrameLocked(ci, respAsdu, p);
         break;
     }

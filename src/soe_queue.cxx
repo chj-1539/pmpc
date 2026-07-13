@@ -9,6 +9,10 @@ SOEQueue g_soeQueue;
 void SOEQueue::Push(const SOEEvent& ev)
 {
     std::lock_guard<std::mutex> lock(mtx_);
+    // P2-2（第二轮）：当 PempServer 未连接时 DI 高频翻转会无限入队，
+    // 长时间运行耗尽内存。超过 maxSize_（若设置）时从队首丢弃最老事件。
+    if (maxSize_ > 0 && events_.size() >= maxSize_)
+        events_.pop_front();
     events_.push_back(ev);
 }
 
@@ -16,9 +20,14 @@ void SOEQueue::PushFrontBatch(const std::vector<SOEEvent>& events)
 {
     if (events.empty()) return;
     std::lock_guard<std::mutex> lock(mtx_);
-    // 使用倒序 emplace_front 保持传入 vector 原有顺序在 deque 前部
-    for (auto it = events.rbegin(); it != events.rend(); ++it)
+    // P2-2: 同样守卫 maxSize_
+    size_t added = 0;
+    for (auto it = events.rbegin(); it != events.rend(); ++it) {
+        if (maxSize_ > 0 && events_.size() + added >= maxSize_)
+            break;
         events_.push_front(*it);
+        added++;
+    }
 }
 
 std::vector<SOEEvent> SOEQueue::PopAll()

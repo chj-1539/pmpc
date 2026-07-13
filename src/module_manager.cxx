@@ -84,7 +84,10 @@ struct PempServerModule::Impl {
     int diUploadMs = 5000;
     int aiUploadMs = 5000;
     std::vector<PempBind> binds;
+    bool rcPasswordParsed = false;
     std::string rcPassword;    ///< 遥控密码（M3 修复），空 = 不校验
+    bool clockSyncEnable = false;   ///< PS-2（第二轮）
+    bool clockSyncVerbose = false;  ///< PS-2（第二轮）
     bool running = false;
     ~Impl() { delete server; }
 };
@@ -103,6 +106,8 @@ bool PempServerModule::LoadConfig(const std::string& cfgPath) {
     impl_->diUploadMs = ini.GetInt("global", "di_upload_ms", 5000);
     impl_->aiUploadMs = ini.GetInt("global", "ai_upload_ms", 5000);
     impl_->rcPassword = ini.Get("global", "rc_password", "");
+    impl_->clockSyncEnable = ini.GetInt("global", "clock_sync_enable", 0) != 0;
+    impl_->clockSyncVerbose = ini.GetInt("global", "clock_sync_verbose", 0) != 0;
     // 解析 [listen_N]
     impl_->binds.clear();
     for (auto& sec : ini.Sections()) {
@@ -133,6 +138,8 @@ bool PempServerModule::Start() {
     if (!impl_->binds.empty())
         impl_->server->setBinds(impl_->binds);
     impl_->server->setRemoteCtrlPassword(impl_->rcPassword);
+    impl_->server->setClockSyncEnable(impl_->clockSyncEnable);
+    impl_->server->setClockSyncVerbose(impl_->clockSyncVerbose);
     impl_->running = impl_->server->start();
     return impl_->running;
 }
@@ -320,6 +327,7 @@ bool ModuleManager::ReloadModule(const std::string& name) {
 }
 
 bool ModuleManager::StartModule(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mgrMtx_);
     int idx = FindModule(name);
     if (idx < 0) { std::cerr << "[ModuleManager] Unknown: " << name << std::endl; return false; }
     if (modules_[idx]->IsRunning()) return true;
@@ -329,6 +337,7 @@ bool ModuleManager::StartModule(const std::string& name) {
 }
 
 bool ModuleManager::StopModule(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mgrMtx_);
     int idx = FindModule(name);
     if (idx < 0) { std::cerr << "[ModuleManager] Unknown: " << name << std::endl; return false; }
     if (!modules_[idx]->IsRunning()) return true;

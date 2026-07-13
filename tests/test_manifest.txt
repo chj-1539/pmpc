@@ -57,6 +57,9 @@ test_data_recorder_atomic       | test_data_recorder_atomic.cxx       |
 test_dlt645_frame_codec         | test_dlt645_frame_codec.cxx         |
 test_iec103_master_frame        | test_iec103_master_frame.cxx        |
 test_iec101_slave_send_ack      | test_iec101_slave_send_ack.cxx      |
+test_redundancy_stability       | test_redundancy_stability.cxx       | src/redundancy.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/socket.cpp
+test_debug_console_race         | test_debug_console_race.cxx         | src/socket.cpp
+test_pemp_server_quantize_nan   | test_pemp_server_quantize_nan.cxx   |
 #
 # === Phase 3: 协议主站测试 (待添加) ===
 #

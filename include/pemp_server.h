@@ -41,6 +41,10 @@ public:
     void setRemoteCtrlPassword(const std::string& pw) { rcPassword_ = pw; }
     const std::string& remoteCtrlPassword() const { return rcPassword_; }
 
+    // PS-2（第二轮）: 08H 时钟同步帧日志。默认不输出（不干扰生产日志）。
+    void setClockSyncEnable(bool v) { clockSyncEnable_ = v; }
+    void setClockSyncVerbose(bool v) { clockSyncVerbose_ = v; }
+
     bool start();
     void stop();
     bool is_running() const { return running_; }
@@ -51,7 +55,10 @@ public:
 
 private:
     void accept_loop(const PempBind& bind, socket& listen_sock);
-    void client_handler(socket client, socket_addr peer);
+    // PS-3（第二轮）：client_handler 接收 shared_ptr<atomic<bool>> done，
+    // 退出前置位。accept_loop 定期清理已退出的线程。
+    void client_handler(socket client, socket_addr peer,
+                        std::shared_ptr<std::atomic<bool>> done);
 
     // ── 命令分发 ──
     void handle_request(const std::vector<uint8_t>& frame,
@@ -86,10 +93,16 @@ private:
     int aiUploadMs_;
     std::vector<PempBind> binds_;
     std::string rcPassword_;   ///< 遥控密码；空 = 不校验（M3 修复）
+    bool clockSyncEnable_ = false;  ///< PS-2（第二轮）：收到 08H 同步帧时是否 log 时间；设为 true 每收到一次打一行日志
+    bool clockSyncVerbose_ = false; ///< 设为 true 每次 08H 都 log；false 只在首次 log
     std::atomic<bool> running_{true};
     std::vector<socket> listenSocks_;
     std::vector<std::thread> acceptThreads_;
     std::vector<std::thread> clientThreads_;
+    // PS-3（第二轮）：与 clientThreads_ 一一对应的完成标志。client_handler
+    // 任何退出路径置位 done；accept_loop 定期 cleanup 只 join+erase 已完成的，
+    // 防止 clientThreads_ 无限增长（老代码只 emplace_back 从不清理）。
+    std::vector<std::shared_ptr<std::atomic<bool>>> clientDoneFlags_;
     std::mutex clientMtx_;
     std::vector<std::weak_ptr<bool>> clientLiveFlags_;
 

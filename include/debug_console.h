@@ -95,7 +95,10 @@ private:
     };
     // ── TCP 服务 ──
     void AcceptLoop(const BindConfig& bind, socket& listenSock);
-    void ClientThread(socket clientSock);
+    // DC-3（第二轮）修复：ClientThread 接收 shared_ptr<atomic<bool>> done，
+    // 退出前置位。AcceptLoop 的 cleanup 只 join+erase done=true 的线程；
+    // 老代码用 joinable() 判活会把正在跑的线程 detach，Stop() 后 UAF。
+    void ClientThread(socket clientSock, std::shared_ptr<std::atomic<bool>> done);
 
     // ── 发送响应 ──
     void Send(socket& sock, const std::string& text);
@@ -129,10 +132,15 @@ private:
     int CreateAutoTask(AutoTask::Type type, uint16_t ch, uint16_t dev,
                        uint16_t pt, int intervalMs);
     bool StopAutoTask(int id);
-    void AutoToggleThread(int taskId, uint16_t ch, uint16_t dev,
-                          uint16_t pt, int intervalMs);
-    void AutoSweepThread(int taskId, uint16_t ch, uint16_t dev,
-                         uint16_t pt, int intervalMs);
+    // DC-1（第二轮）修复：AutoToggleThread / AutoSweepThread 现在直接接收
+    // 指向自己 AutoTask::stopFlag 的指针，不再遍历 autoTasks_ 找自己 ——
+    // 避免"thread 启动 vs push_back 顺序 race"（老代码线程先跑、push 后做，
+    // 首轮找不到自己就 return，任务空转）。stopFlag 用 atomic<bool>，
+    // 无需锁。
+    void AutoToggleThread(std::atomic<bool>* stopFlag,
+                          uint16_t ch, uint16_t dev, uint16_t pt, int intervalMs);
+    void AutoSweepThread(std::atomic<bool>* stopFlag,
+                         uint16_t ch, uint16_t dev, uint16_t pt, int intervalMs);
 
     // ── 辅助 ──
     static bool ParseUint16(const std::string& s, uint16_t& out);
@@ -149,6 +157,9 @@ private:
     std::vector<socket> listenSocks_;
     std::vector<std::thread> acceptThreads_;
     std::vector<std::thread> clientThreads_;
+    // DC-3（第二轮）: 与 clientThreads_ 一一对应的完成标志。ClientThread
+    // 返回前置位 true；AcceptLoop 定期 cleanup 只 join+erase 已完成的。
+    std::vector<std::shared_ptr<std::atomic<bool>>> clientDoneFlags_;
     std::mutex clientMtx_;
 
     // 自动变位任务管理
