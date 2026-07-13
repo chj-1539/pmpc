@@ -208,6 +208,14 @@ public:
 
     const IEC104MasterConfig& GetConfig() const { return config_; }
 
+    // M2 修复：I 帧 ctrl 字段编码（sNr[15:1] | rNr[31:17]，bit0/bit16=0）
+    // 与解码 helper。inline 且 public，便于直接测试。
+    static inline uint32_t EncodeIFrameCtrl(uint32_t sNr, uint32_t rNr) {
+        return ((sNr & 0x7FFF) << 1) | ((rNr & 0x7FFF) << 17);
+    }
+    static inline uint32_t DecodeSendSeq(uint32_t ctrl) { return (ctrl >> 1)  & 0x7FFF; }
+    static inline uint32_t DecodeRecvSeq(uint32_t ctrl) { return (ctrl >> 17) & 0x7FFF; }
+
 private:
     // ── 配置解析 ──
     bool ParseGlobal(const std::string& key, const std::string& val);
@@ -235,8 +243,14 @@ private:
 
     // ── IEC 104 协议 ──
     bool SendUFrame(socket& sock, uint32_t ctrl);
+    // M2 修复：I 帧的 ctrl 字段编码发送序号 sNr 与接收序号 rNr。
+    // ChannelThread 每条连接维护一对 (sendSeq, recvSeq)：
+    //   sendSeq: 本机已发 I 帧数
+    //   recvSeq: 已成功接收对端 I 帧数（供 S/I 帧的 rNr 字段确认）
+    // SendIFrame 现在接收 sendSeq/recvSeq 引用，写入 ctrl 并把 sendSeq +1。
+    bool SendIFrame(socket& sock, const uint8_t* asdu, size_t asduLen,
+                    uint32_t& sendSeq, uint32_t recvSeq);
     bool SendSFrame(socket& sock);
-    bool SendIFrame(socket& sock, const uint8_t* asdu, size_t asduLen);
     bool RecvFrame(socket& sock, int timeoutMs, uint8_t* buf, size_t& len);
     bool HandleUFrame(uint32_t ctrl);
     bool HandleSFrame(uint32_t ctrl);
@@ -258,10 +272,10 @@ private:
                                   int chIdx, const IEC104DeviceConfig* dev);
 
     // ── 时钟同步 ──
-    void SendClockSync(socket& sock);
+    void SendClockSync(socket& sock, uint32_t& sendSeq, uint32_t recvSeq);
 
     // ── 总召唤 ──
-    void SendTotalInterrogation(socket& sock);
+    void SendTotalInterrogation(socket& sock, uint32_t& sendSeq, uint32_t recvSeq);
 
     // ── 辅助 ──
     uint64_t NowMs() const;

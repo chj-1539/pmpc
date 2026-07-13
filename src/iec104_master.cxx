@@ -70,9 +70,12 @@ bool Iec104Master::SendSFrame(socket& sock) {
     return true;
 }
 
-bool Iec104Master::SendIFrame(socket& sock, const uint8_t* asdu, size_t asduLen) {
+bool Iec104Master::SendIFrame(socket& sock, const uint8_t* asdu, size_t asduLen,
+                              uint32_t& sendSeq, uint32_t recvSeq) {
     if (asduLen > 250) return false;
-    uint32_t ctrl = 0;
+    // M2 修复：以前 ctrl 恒为 0，严格从站收满 k=12 个未确认 I 帧后拒绝。
+    // 现在按 IEC 104 规范用 sendSeq/recvSeq 编码 ctrl，并把 sendSeq +1。
+    uint32_t ctrl = EncodeIFrameCtrl(sendSeq, recvSeq);
     uint8_t buf[256]; size_t pos = 0;
     buf[pos++] = FRAME_START;
     buf[pos++] = static_cast<uint8_t>(4 + asduLen);
@@ -82,6 +85,7 @@ bool Iec104Master::SendIFrame(socket& sock, const uint8_t* asdu, size_t asduLen)
     PacketLogger::Instance().Log(PktDir::TX, 0, 0, 0, asdu[0], 0, buf, pos);
     size_t total = 0;
     while (total < pos) { size_t n = sock.send(buf + total, pos - total); if (n == 0) return false; total += n; }
+    sendSeq = (sendSeq + 1) & 0x7FFF;   // sNr 是 15 位
     return true;
 }
 
@@ -154,12 +158,12 @@ void Iec104Master::HandleGIResponseEnergy(const uint8_t* asdu, size_t asduLen, i
 
 // ==================== 总召唤 ====================
 
-void Iec104Master::SendTotalInterrogation(socket& sock) {
+void Iec104Master::SendTotalInterrogation(socket& sock, uint32_t& sendSeq, uint32_t recvSeq) {
     uint8_t asdu[] = {IecType::C_IC_NA_1, 0x01, IecCOT::ACTIVATION, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x14};
-    SendIFrame(sock, asdu, sizeof(asdu));
+    SendIFrame(sock, asdu, sizeof(asdu), sendSeq, recvSeq);
 }
 
-void Iec104Master::SendClockSync(socket& sock) {
+void Iec104Master::SendClockSync(socket& sock, uint32_t& sendSeq, uint32_t recvSeq) {
     auto now = std::chrono::system_clock::now();
     auto tt = std::chrono::system_clock::to_time_t(now);
     struct tm t;
@@ -173,7 +177,7 @@ void Iec104Master::SendClockSync(socket& sock) {
         static_cast<uint8_t>(t.tm_min & 0x3F), static_cast<uint8_t>(t.tm_hour & 0x1F),
         static_cast<uint8_t>(t.tm_mday & 0x1F), static_cast<uint8_t>((t.tm_mon + 1) & 0x0F),
         static_cast<uint8_t>((t.tm_year - 100) & 0x7F)};
-    SendIFrame(sock, asdu, sizeof(asdu));
+    SendIFrame(sock, asdu, sizeof(asdu), sendSeq, recvSeq);
 }
 
 // ==================== I-frame 分发 ====================
@@ -208,6 +212,11 @@ void Iec104Master::ChannelThread(int chIdx) {
     Endpoint endpoints[] = {{ch.ip, static_cast<int>(ch.port)}, {ch.standbyIp, ch.standbyPort > 0 ? ch.standbyPort : static_cast<int>(ch.port)}};
     int currentEp = 0;
 
+    // M2 修复：每连接维护 I 帧发/收序号，写入 ctrl 字段供从站按 IEC 104
+    // 规范滑动窗口 (k=12/w=8) 确认。新连接建立时重置为 0。
+    uint32_t sendSeq = 0;
+    uint32_t recvSeq = 0;
+
     while (running_) {
         socket sock; bool connected = false;
         int tried = 0;
@@ -220,6 +229,7 @@ void Iec104Master::ChannelThread(int chIdx) {
                 try {
                     sock.connect(endpoints[idx].ip, static_cast<uint16_t>(endpoints[idx].port));
                     connected = true; currentEp = idx;
+                    sendSeq = 0; recvSeq = 0;   // M2: 新连接重置 seq
                     std::cout << "[IEC104] Channel" << (chIdx+1) << " connected "
                               << endpoints[idx].ip << ":" << endpoints[idx].port
                               << (idx == 1 ? " (standby)" : "") << std::endl;
@@ -231,8 +241,8 @@ void Iec104Master::ChannelThread(int chIdx) {
                         }
                     }
                     retryLeft = ch.retryCount;
-                    if (giMs > 0) SendTotalInterrogation(sock);
-                    if (clockMs > 0) SendClockSync(sock);
+                    if (giMs > 0) SendTotalInterrogation(sock, sendSeq, recvSeq);
+                    if (clockMs > 0) SendClockSync(sock, sendSeq, recvSeq);
                 } catch (const std::exception& e) {
                     retryLeft--;
                     std::cerr << "[IEC104] " << endpoints[idx].ip << ":" << endpoints[idx].port
@@ -263,6 +273,8 @@ void Iec104Master::ChannelThread(int chIdx) {
                     if ((ctrl & 0x03) == 0x03) { /* U-frame */ }
                     else if ((ctrl & 0x03) == 0x01) { /* S-frame */ }
                     else if (asduLen > 0) {
+                        // M2: 收到 I 帧后 recvSeq +1，等下次自己发帧时把它填进 rNr
+                        recvSeq = (recvSeq + 1) & 0x7FFF;
                         uint16_t coa = 0;
                         if (asduLen >= 6) coa = static_cast<uint16_t>(static_cast<uint16_t>(asdu[4]) | (static_cast<uint16_t>(asdu[5]) << 8));
                         IEC104DeviceConfig* dev = FindDevice(chIdx, coa);
@@ -270,8 +282,8 @@ void Iec104Master::ChannelThread(int chIdx) {
                     }
                 }
                 auto now = std::chrono::steady_clock::now();
-                if (giMs > 0 && (now - lastGI >= std::chrono::milliseconds(giMs))) { SendTotalInterrogation(sock); lastGI = now; }
-                if (clockMs > 0 && (now - lastClock >= std::chrono::milliseconds(clockMs))) { SendClockSync(sock); lastClock = now; }
+                if (giMs > 0 && (now - lastGI >= std::chrono::milliseconds(giMs))) { SendTotalInterrogation(sock, sendSeq, recvSeq); lastGI = now; }
+                if (clockMs > 0 && (now - lastClock >= std::chrono::milliseconds(clockMs))) { SendClockSync(sock, sendSeq, recvSeq); lastClock = now; }
             } catch (const socket_error& e) {
                 std::cerr << "[IEC104] Disconnected: " << e.what() << std::endl;
                 connected = false;
