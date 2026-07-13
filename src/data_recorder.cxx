@@ -594,19 +594,51 @@ void DataRecorder::TimerThread()
         if (!running_) break;
         if (!enabled_ || !mysql_) continue;
 
+        // H10 修复：先在锁**外**做慢的 mysql_ping / 断连重连，仅当拿到
+        // 新连接（或确认现有连接可用）后再拿 mysqlMtx_ 做 swap + 快速
+        // 状态更新 + AI 批量写。之前整个 ping/reconnect 段都在 mysqlMtx_
+        // 里，重连若需要几十秒，其间 OnDIChange/OnAIChange 等订阅者被
+        // 阻塞，EventBus Publish 也随之停摆。
+        bool needReconnect = false;
         {
             std::lock_guard<std::mutex> lock(mysqlMtx_);
-
-            // 定期确保 MySQL 连接存活，并更新实例在线状态
-            if (mysql_ping(mysql_) != 0) {
+            if (mysql_ && mysql_ping(mysql_) != 0) {
                 std::cerr << "[DataRecorder] MySQL 连接断开，尝试重连..." << std::endl;
-                DisconnectMySQL();
-                if (!ConnectMySQL() || !CreateTables()) {
-                    std::cerr << "[DataRecorder] 重连失败" << std::endl;
-                    continue;
+                needReconnect = true;
+            }
+        }
+        // 重连在无锁下进行 —— 建立一个独立的 MYSQL* 连接，成功后再进锁 swap。
+        if (needReconnect) {
+            MYSQL* newConn = mysql_init(nullptr);
+            if (newConn && mysql_real_connect(newConn, host_.c_str(), user_.c_str(),
+                                              password_.c_str(), dbName_.c_str(),
+                                              static_cast<unsigned int>(port_),
+                                              nullptr, 0))
+            {
+                // 拿到新连接，快速切换（关旧的在锁外完成）
+                MYSQL* oldConn = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(mysqlMtx_);
+                    oldConn = mysql_;
+                    mysql_ = newConn;
+                    connected_ = true;
+                }
+                if (oldConn) mysql_close(oldConn);
+                {
+                    std::lock_guard<std::mutex> lock(mysqlMtx_);
+                    CreateTables();   // 保留原先在锁内的表初始化
                 }
                 std::cout << "[DataRecorder] MySQL 重连成功" << std::endl;
+            } else {
+                std::cerr << "[DataRecorder] 重连失败: "
+                          << (newConn ? mysql_error(newConn) : "mysql_init 失败") << std::endl;
+                if (newConn) mysql_close(newConn);
+                continue;   // 跳过本轮 timer 后续动作，下一轮再试
             }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mysqlMtx_);
 
             // 更新实例在线状态
             {
