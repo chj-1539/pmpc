@@ -107,7 +107,8 @@ void Iec101Slave::SendGIRsp(CommIO& io, uint16_t linkAddr, uint16_t coa) {
             asdu[pos++] = (uint8_t)(ioa & 0xFF); asdu[pos++] = (uint8_t)((ioa >> 8) & 0xFF); asdu[pos++] = (uint8_t)((ioa >> 16) & 0xFF);
             asdu[pos++] = (mgr.GetDi(di.ch, di.dev, di.point, pt) && pt.value) ? 0x01 : 0x00;
             uint8_t frame[MAX_FRAME]; size_t fp = 0;
-            uint8_t len = (uint8_t)(4 + pos);
+            // CR-6: LEN = CTRL(1) + ADDR(2) + asduLen = 3 + asduLen（不是 4）
+            uint8_t len = (uint8_t)(3 + pos);
             frame[fp++] = IEC101_START_VAR; frame[fp++] = len; frame[fp++] = len; frame[fp++] = IEC101_START_VAR;
             frame[fp++] = 0x0B; frame[fp++] = (uint8_t)(linkAddr & 0xFF); frame[fp++] = (uint8_t)((linkAddr >> 8) & 0xFF);
             std::memcpy(frame + fp, asdu, pos); fp += pos;
@@ -119,7 +120,8 @@ void Iec101Slave::SendGIRsp(CommIO& io, uint16_t linkAddr, uint16_t coa) {
     uint8_t termAsdu[] = { IecType::C_IC_NA_1, 0x01, IecCOT::ACTIVATION_TERM, 0x00,
         (uint8_t)(coa & 0xFF), (uint8_t)((coa >> 8) & 0xFF), 0x00, 0x00, 0x00, 0x14 };
     uint8_t frame[MAX_FRAME]; size_t fp = 0;
-    uint8_t len = (uint8_t)(4 + sizeof(termAsdu));
+    // CR-6: LEN = 3 + asduLen
+    uint8_t len = (uint8_t)(3 + sizeof(termAsdu));
     frame[fp++] = IEC101_START_VAR; frame[fp++] = len; frame[fp++] = len; frame[fp++] = IEC101_START_VAR;
     frame[fp++] = 0x0B; frame[fp++] = (uint8_t)(linkAddr & 0xFF); frame[fp++] = (uint8_t)((linkAddr >> 8) & 0xFF);
     std::memcpy(frame + fp, termAsdu, sizeof(termAsdu)); fp += sizeof(termAsdu);
@@ -146,33 +148,58 @@ bool Iec101Slave::FindAndExecDO(const uint8_t* asdu, size_t len) {
 
 void Iec101Slave::HandleFrame(CommIO& io, const uint8_t* buf, size_t len) {
     if (len < 5) return;
-    uint8_t ctrl = buf[1];
-    uint16_t linkAddr = (uint16_t)((uint16_t)buf[2] | ((uint16_t)buf[3] << 8));
+
+    // CR-5（第二轮）修复：分帧类型再取 CTRL。老代码统一 `ctrl = buf[1]`，
+    // 但可变帧 `[0x68 LEN LEN 0x68 CTRL ...]` 里 buf[1] 是 LEN，不是 CTRL。
+    // 如果 LEN 低 4 位刚好等于 0 → 误发 Reset ACK；等于 A/B → 误发 Class1
+    // 数据；主站永远收不到 GI/遥控 confirm。
+    uint16_t linkAddr = 0;
+    uint8_t  ctrl = 0;
+    if (buf[0] == IEC101_START_FIX) {
+        // 固定帧: [0x10 CTRL ADDR_L (ADDR_H) CS END] — 单/双字节 link addr
+        // 我们只支持双字节 addr（与 SendACK / SendGIRsp 一致）
+        if (len < 6) return;
+        ctrl = buf[1];
+        linkAddr = (uint16_t)((uint16_t)buf[2] | ((uint16_t)buf[3] << 8));
+    } else if (buf[0] == IEC101_START_VAR) {
+        // 可变帧: [0x68 LEN LEN 0x68 CTRL ADDR_L ADDR_H ASDU... CS END]
+        if (len < 9) return;
+        ctrl = buf[4];
+        linkAddr = (uint16_t)((uint16_t)buf[5] | ((uint16_t)buf[6] << 8));
+    } else {
+        return;   // 非法起始符
+    }
     uint8_t fun = ctrl & 0x0F;
 
-    if (fun == 0x00) { SendACK(io, linkAddr); return; } // reset
-    if (fun == 0x0A || fun == 0x0B) { // REQ_1D / REQ_2D
-        // simplified: send one DI point as class 1 data
-        if (!config_.devices.empty()) {
-            uint8_t asdu[32]; size_t pos = 0; auto& dev = config_.devices[0];
-            asdu[pos++] = IecType::M_SP_NA_1; asdu[pos++] = 0x01;
-            asdu[pos++] = IecCOT::BACKGROUND; asdu[pos++] = 0x00;
-            asdu[pos++] = (uint8_t)(dev.coa & 0xFF); asdu[pos++] = (uint8_t)((dev.coa >> 8) & 0xFF);
-            asdu[pos++] = 0x01; asdu[pos++] = 0x00; asdu[pos++] = 0x00; asdu[pos++] = 0x00;
+    // 固定帧的功能码分支只对固定帧生效
+    if (buf[0] == IEC101_START_FIX) {
+        if (fun == 0x00) { SendACK(io, linkAddr); return; } // reset
+        if (fun == 0x0A || fun == 0x0B) { // REQ_1D / REQ_2D
+            // simplified: send one DI point as class 1 data
+            if (!config_.devices.empty()) {
+                uint8_t asdu[32]; size_t pos = 0; auto& dev = config_.devices[0];
+                asdu[pos++] = IecType::M_SP_NA_1; asdu[pos++] = 0x01;
+                asdu[pos++] = IecCOT::BACKGROUND; asdu[pos++] = 0x00;
+                asdu[pos++] = (uint8_t)(dev.coa & 0xFF); asdu[pos++] = (uint8_t)((dev.coa >> 8) & 0xFF);
+                asdu[pos++] = 0x01; asdu[pos++] = 0x00; asdu[pos++] = 0x00; asdu[pos++] = 0x00;
 
-            uint8_t frame[MAX_FRAME]; size_t fp = 0;
-            uint8_t l = (uint8_t)(4 + pos);
-            frame[fp++] = IEC101_START_VAR; frame[fp++] = l; frame[fp++] = l; frame[fp++] = IEC101_START_VAR;
-            frame[fp++] = 0x0B; frame[fp++] = (uint8_t)(linkAddr & 0xFF); frame[fp++] = (uint8_t)((linkAddr >> 8) & 0xFF);
-            std::memcpy(frame + fp, asdu, pos); fp += pos;
-            uint8_t cs = CalcCS(frame + 4, fp - 4); frame[fp++] = cs; frame[fp++] = IEC101_END;
-            try { io.write(frame, fp); } catch (...) {}
+                uint8_t frame[MAX_FRAME]; size_t fp = 0;
+                // CR-6: LEN = CTRL(1) + ADDR(2) + asduLen = 3 + asduLen（不是 4）
+                uint8_t l = (uint8_t)(3 + pos);
+                frame[fp++] = IEC101_START_VAR; frame[fp++] = l; frame[fp++] = l; frame[fp++] = IEC101_START_VAR;
+                frame[fp++] = 0x0B; frame[fp++] = (uint8_t)(linkAddr & 0xFF); frame[fp++] = (uint8_t)((linkAddr >> 8) & 0xFF);
+                std::memcpy(frame + fp, asdu, pos); fp += pos;
+                uint8_t cs = CalcCS(frame + 4, fp - 4); frame[fp++] = cs; frame[fp++] = IEC101_END;
+                try { io.write(frame, fp); } catch (...) {}
+            }
+            return;
         }
+        // 其他固定帧 fun 暂不处理
         return;
     }
 
-    // variable frame with ASDU
-    if (buf[0] == IEC101_START_VAR && len >= 7) {
+    // variable frame with ASDU（buf[0] == IEC101_START_VAR，L11 已保证 LEN≥4）
+    if (len >= 7) {
         const uint8_t* asdu = buf + 7;
         size_t asduLen = len - 7 - 2;
         if (asduLen < 4) return;
@@ -184,7 +211,8 @@ void Iec101Slave::HandleFrame(CommIO& io, const uint8_t* buf, size_t len) {
             uint8_t confAsdu[] = { IecType::C_IC_NA_1, 0x01, IecCOT::ACTIVATION_CON, 0x00,
                 (uint8_t)(coa & 0xFF), (uint8_t)((coa >> 8) & 0xFF), 0x00, 0x00, 0x00, 0x14 };
             uint8_t f[MAX_FRAME]; size_t fp = 0;
-            uint8_t l = (uint8_t)(4 + sizeof(confAsdu));
+            // CR-6: LEN = 3 + asduLen
+            uint8_t l = (uint8_t)(3 + sizeof(confAsdu));
             f[fp++] = IEC101_START_VAR; f[fp++] = l; f[fp++] = l; f[fp++] = IEC101_START_VAR;
             f[fp++] = 0x0B; f[fp++] = (uint8_t)(linkAddr & 0xFF); f[fp++] = (uint8_t)((linkAddr >> 8) & 0xFF);
             std::memcpy(f + fp, confAsdu, sizeof(confAsdu)); fp += sizeof(confAsdu);
@@ -199,7 +227,8 @@ void Iec101Slave::HandleFrame(CommIO& io, const uint8_t* buf, size_t len) {
             std::memcpy(confAsdu, asdu, asduLen < 16 ? asduLen : 16);
             confAsdu[2] = IecCOT::ACTIVATION_CON; cp = asduLen < 16 ? asduLen : 16;
             uint8_t f[MAX_FRAME]; size_t fp = 0;
-            uint8_t l = (uint8_t)(4 + cp);
+            // CR-6: LEN = 3 + asduLen
+            uint8_t l = (uint8_t)(3 + cp);
             f[fp++] = IEC101_START_VAR; f[fp++] = l; f[fp++] = l; f[fp++] = IEC101_START_VAR;
             f[fp++] = 0x0B; f[fp++] = (uint8_t)(linkAddr & 0xFF); f[fp++] = (uint8_t)((linkAddr >> 8) & 0xFF);
             std::memcpy(f + fp, confAsdu, cp); fp += cp;

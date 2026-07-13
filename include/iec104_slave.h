@@ -122,6 +122,12 @@ public:
     void Stop();
     bool IsRunning() const { return running_; }
 
+    // CR-3（第二轮）：ClientInfo 前置声明，让下面 Send*Locked / HandleFrame /
+    // BuildGIResponse* 签名能引用它。完整定义仍在 private 段内。
+private:
+    struct ClientInfo;
+public:
+
     // C_SC_NA_1 遥控决策纯函数（H5 修复）。给定某个 IOA 上的 DO mapping
     // 列表和帧内 cmdVal，返回**应该**触发 SetDoMaster 的 (ch, dev, point)
     // 列表。若无匹配则返回空 vector —— 修复前老代码会 fallback 到
@@ -170,6 +176,13 @@ private:
     bool SendSFrame(socket& sock, uint32_t rNr);
     bool SendIFrame(socket& sock, uint32_t& sNr, uint32_t rNr,
                     const uint8_t* asdu, size_t asduLen);
+
+    // CR-3 修复：需要"发到同一 client"的场景（ClientThread 内 HandleFrame /
+    // 主动上传遍历）应走这几个 wrapper，函数入口自动持 client 的 sendMtx，
+    // 避免与其他线程往同一 socket 交错写。
+    bool SendUFrameLocked(ClientInfo& ci, uint32_t ctrl);
+    bool SendSFrameLocked(ClientInfo& ci, uint32_t rNr);
+    bool SendIFrameLocked(ClientInfo& ci, const uint8_t* asdu, size_t asduLen);
     // peerClosedOut（可选）：调用者可判断 return false 的原因
     //   *peerClosedOut = true → recv 返回 0，对端正常 close，socket 已被本地关闭
     //   *peerClosedOut = false → 超时或帧格式错，socket 仍可用
@@ -177,17 +190,16 @@ private:
                    bool* peerClosedOut = nullptr);
 
     // ── 帧处理 ──
-    bool HandleFrame(socket& sock, const uint8_t* buf, size_t len,
-                     uint32_t& sNr, uint32_t& rNr,
+    // CR-3 修复：ClientThread 里的所有响应发送都要走 SendIFrameLocked 系列
+    // 以与主动上传线程同步，因此 HandleFrame / BuildGIResponse* 传入 ClientInfo&
+    // 而不是裸 socket。
+    bool HandleFrame(ClientInfo& ci, const uint8_t* buf, size_t len,
                      SlaveDeviceConfig*& currentDev);
 
     // ── ASDU 构建 ──
-    void BuildGIResponseDI(socket& sock, uint32_t& sNr, uint32_t rNr,
-                           const SlaveDeviceConfig& dev);
-    void BuildGIResponseAI(socket& sock, uint32_t& sNr, uint32_t rNr,
-                           const SlaveDeviceConfig& dev);
-    void BuildGIResponseEnergy(socket& sock, uint32_t& sNr, uint32_t rNr,
-                                const SlaveDeviceConfig& dev);
+    void BuildGIResponseDI(ClientInfo& ci, const SlaveDeviceConfig& dev);
+    void BuildGIResponseAI(ClientInfo& ci, const SlaveDeviceConfig& dev);
+    void BuildGIResponseEnergy(ClientInfo& ci, const SlaveDeviceConfig& dev);
     void SendDIActiveUpload(const DIChange& ev);
     void SendAIActiveUpload(const AIChange& ev, uint32_t ioa,
                             const SlaveAIMapping& ai, const SlaveDeviceConfig& dev);
@@ -230,6 +242,13 @@ private:
         socket sock;
         uint32_t sNr = 0;
         uint32_t rNr = 0;
+        // CR-3（第二轮）修复：ClientThread 的 recv 循环 + HandleFrame 里各种
+        // Send*Frame 与主动上传路径（SendDIActiveUpload / SendAIActiveUpload /
+        // TimerThread）都可能并发写同一 socket。若不同步会让 TCP 层字节流
+        // 交错，主站按 M12 修复的 apduLen 无效路径直接 shutdown+close 连接。
+        // sendMtx 保护 sock.send() 的原子性（连同 sNr/rNr 递增）；ClientInfo
+        // 由 shared_ptr 管理，vector 内容不可拷贝，OK。
+        std::mutex sendMtx;
     };
     // C1 修复：clients_ 之前是 vector<ClientInfo>（value 类型），但没人 push
     // 进去。改为 shared_ptr 让 ClientThread 直接构造 + 注册；主动上传路径

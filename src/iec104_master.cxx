@@ -59,8 +59,10 @@ bool Iec104Master::SendUFrame(socket& sock, uint32_t ctrl) {
     return true;
 }
 
-bool Iec104Master::SendSFrame(socket& sock) {
-    uint32_t ctrl = 0x00010000;
+bool Iec104Master::SendSFrame(socket& sock, uint32_t recvSeq) {
+    // CR-4 修复：ctrl = 0x01 | (recvSeq<<17)。老代码 `0x00010000` 硬编码
+    // rNr=0，主站从不确认，从站 k=12 满后停发。
+    uint32_t ctrl = EncodeSFrameCtrl(recvSeq);
     uint8_t buf[] = {FRAME_START, 0x04,
         static_cast<uint8_t>(ctrl & 0xFF), static_cast<uint8_t>((ctrl >> 8) & 0xFF),
         static_cast<uint8_t>((ctrl >> 16) & 0xFF), static_cast<uint8_t>((ctrl >> 24) & 0xFF)};
@@ -182,7 +184,7 @@ void Iec104Master::SendClockSync(socket& sock, uint32_t& sendSeq, uint32_t recvS
 
 // ==================== I-frame 分发 ====================
 
-bool Iec104Master::HandleIFrame(socket& sock, const uint8_t* asdu, size_t asduLen, int chIdx, const IEC104DeviceConfig* dev) {
+bool Iec104Master::HandleIFrame(socket& sock, const uint8_t* asdu, size_t asduLen, int chIdx, const IEC104DeviceConfig* dev, uint32_t recvSeq) {
     if (asduLen < 6) return true;
     uint8_t type = asdu[0]; uint8_t cot = asdu[2];
     switch (cot) {
@@ -196,7 +198,8 @@ bool Iec104Master::HandleIFrame(socket& sock, const uint8_t* asdu, size_t asduLe
         else if (type == IecType::M_IT_NA_1) HandleGIResponseEnergy(asdu, asduLen, chIdx, dev);
         break;
     }
-    SendSFrame(sock);
+    // CR-4 修复：把当前 recvSeq 传给 SendSFrame，让 rNr 正确回填。
+    SendSFrame(sock, recvSeq);
     return true;
 }
 
@@ -278,7 +281,8 @@ void Iec104Master::ChannelThread(int chIdx) {
                         uint16_t coa = 0;
                         if (asduLen >= 6) coa = static_cast<uint16_t>(static_cast<uint16_t>(asdu[4]) | (static_cast<uint16_t>(asdu[5]) << 8));
                         IEC104DeviceConfig* dev = FindDevice(chIdx, coa);
-                        HandleIFrame(sock, asdu, asduLen, chIdx, dev);
+                        // CR-4: 把当前 recvSeq 传下去让 SendSFrame 正确确认
+                        HandleIFrame(sock, asdu, asduLen, chIdx, dev, recvSeq);
                     }
                 }
                 auto now = std::chrono::steady_clock::now();

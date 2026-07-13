@@ -284,6 +284,18 @@ add_pmpc_test(test_data_mgr_ts_defense test_data_mgr_ts_defense.cxx
     ${CMAKE_SOURCE_DIR}/src/protocol.cxx
 )
 
+# CR-2 (第二轮): DataRecorder::TimerThread 配置 clamp helper 回归
+# 纯逻辑测试，data_recorder_helpers.h 无 mysql.h 依赖
+add_pmpc_test(test_data_recorder_helpers test_data_recorder_helpers.cxx)
+
+# CR-4 (第二轮): iec104_master S 帧 rNr 编码回归
+# EncodeSFrameCtrl 已 inline，测试零依赖
+add_pmpc_test(test_iec104_master_sframe_ctrl test_iec104_master_sframe_ctrl.cxx)
+
+# CR-5 + CR-6 (第二轮): iec101_slave 帧类型分派 + LEN 字段公式回归
+# VariableFrameLen / CtrlOffsetForStart 已 inline，测试零依赖
+add_pmpc_test(test_iec101_slave_frame_layout test_iec101_slave_frame_layout.cxx)
+
 # C1: iec104_slave 客户端注册（ClientThread 应把自己 push 进 clients_）
 add_pmpc_test(test_iec104_slave_client_registration test_iec104_slave_client_registration.cxx
     ${CMAKE_SOURCE_DIR}/src/iec104_slave.cxx

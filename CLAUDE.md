@@ -236,6 +236,19 @@ SOE 帧单条记录格式（12 字节）：`CH(1) | DEV(1) | SOE_ID(2小端) | m
 - **TCP socket 超时 vs 断开**：`set_recv_timeout` 设超时后，`::recv` 在 Windows 上返回 `SOCKET_ERROR`（WSAETIMEDOUT → 抛异常），在 POSIX 上返回 -1（EAGAIN）。recv 返回 0 才是对端正常关闭。代码中异常和返回值需分别处理，不可混为一谈。
 - **WriteDOChanges/WriteAOChanges `lastMaster`/`lastVal` 冲突**（`modbus_tcp_master.cxx`，`modbus_rtu_master.cxx`）：原代码通过对比 `DoPoint::lastMaster` / `AoPoint::lastVal` 判断值是否变化。但 `CheckAllPointChange()`（200ms 周期）会将这两个字段同步为当前值，抢在 master 模块的采集循环（500ms 以上周期）之前，导致变化检测永远认为"无变化" → 不写回。修复为模块级 `doSent_`/`aoSent_` 独立追踪上次已发值。已修复。
 
+### 🩹 第二轮代码审查修复（第一轮 26 处后 audit，回归测试见 tests/）
+
+**背景**：第一轮修完后又派了三个 audit agent 交叉审 —— 一路专审第一轮修复引入的新代码、一路深挖协议层未审模块、一路查服务/基础设施。汇总去重后发现 ~65 处独立问题；先修 6 个致命簇（3 batch）。
+
+- **CR-1 DataRecorder::WriteRT / WriteDI 在持 mysqlMtx_ 路径下再上同一把非递归 mutex → 每次 DI/AI/DO/AO 事件都 UB / 立即死锁**：H10（第一轮修）把重连挪出锁，但 `OnDIChange` 拿锁后走 `WriteDI → CreateDILog（自带 lock_guard）→ ExecSQLPrint（自带 lock_guard）` 递归三层重入。CI 一直绿是因为测试环境从不连真库。修复：`WriteRT`/`WriteDI` 内部全部改用 `*Locked` 版本，删除带锁公开版本 `CreateDILog` / `ExecSQLPrint`（避免未来又误用）。
+- **CR-2 DataRecorder::TimerThread 除零 SIGFPE + `sleep_for(0ms)` 100% CPU 忙等**：若 `ai_interval_ms=0`（或负数），`sleep_for(0ms)` 忙等 + `120000 / aiIntervalMs_` 除零 UB。抽 `ClampAiIntervalMs(cfg)` / `ComputeCleanupPeriodTicks(effective)` 到 [include/data_recorder_helpers.h](include/data_recorder_helpers.h)（无 mysql.h 依赖，可零依赖测试），TimerThread 入口一次性 clamp。回归 [tests/test_data_recorder_helpers.cxx](tests/test_data_recorder_helpers.cxx)（9 tests）。
+- **CR-3 Iec104Slave 主动上报持 clientsMtx_ 全程 send + 每 client 的 sock/sNr/rNr 无发送锁**：C1 修复只做了 clients_ 用 shared_ptr 注册，但 ClientThread 的 recv/HandleFrame 响应 vs SendDIActiveUpload / SendAIActiveUpload / TimerThread 主动上传，两条路径向**同一 socket 并发 send**且不同步 → TCP 字节流交错 → 主站按 M12 的 apduLen 无效路径直接 shutdown+close 连接（M12 + C1 修复叠加为"一有并发就断连"）。修复：`ClientInfo` 加 `sendMtx`；新增 `SendUFrame/SFrame/IFrameLocked(ClientInfo&, ...)` wrapper 加锁后转发；`HandleFrame` / `BuildGIResponse*` 签名从 `socket&` 改为 `ClientInfo&`；主动上传三处改为「锁内快照 clients_ 到局部 vector → 锁外用每 client 的 sendMtx 发送」。一个慢客户端不再阻塞其他 handler 与 accept。
+- **CR-4 Iec104Master::SendSFrame rNr 硬编码 0（`ctrl = 0x00010000`）**：M2 修了 I 帧序号但 S 帧 rNr 常量 0，主站永远确认 rNr=0；严格从站发 12 个未确认 I 帧后停发（k=12 窗口满）。且 `0x00010000` 展开是 [0x00 0x00 0x01 0x00] —— octet1 = 0x00 完全不是 S 帧标记 (`0x01`)。修复：新增 `EncodeSFrameCtrl(rNr) = 0x01 | (rNr<<17)` inline helper；`SendSFrame(socket&, uint32_t recvSeq)`；`HandleIFrame` 把 `recvSeq` 一路传下去。回归 [tests/test_iec104_master_sframe_ctrl.cxx](tests/test_iec104_master_sframe_ctrl.cxx)（10 tests）。
+- **CR-5 iec101_slave HandleFrame 不分帧类型统一读 buf[1] 当 CTRL**：可变帧 `[0x68 LEN LEN 0x68 CTRL ADDR...]` 的 buf[1] 是 LEN！LEN 低 4 位 =0 → 误发 Reset ACK；=A/B → 误发 Class1 数据。与任何合规主站互通就崩。修复：先按 `buf[0]` 分帧类型（固定帧 CTRL 在 buf[1]，可变帧在 buf[4]），只有固定帧才走 fun 分支。抽 `CtrlOffsetForStart(startByte)` inline helper 供测试。
+- **CR-6 iec101_slave 可变帧 LEN 字段 = 4 + asduLen（规约要求 3 + asduLen）**：`LEN = CTRL(1) + ADDR(2) + N_asdu`；老代码所有从站 TX 帧（SendGIRsp、SendACK 附带的 activation-conf、Class1 应答、remote control confirm）多写 1 字节 → 严格主站按 LEN 拉数据把 CS 当 ASDU 末字节 → CS 校验失败丢帧。修复：5 处 `4 + …` 改 `3 + …`；抽 `VariableFrameLen(asduLen)` inline helper。回归 [tests/test_iec101_slave_frame_layout.cxx](tests/test_iec101_slave_frame_layout.cxx)（10 tests，同时覆盖 CR-5 / CR-6）。
+
+**第二轮剩余**：Agent 报告的 High/Medium 约 26 处（Redundancy 冷启动双 Idle / hbMtx_ 内阻塞 connect、DebugConsole AutoTask race / detach UAF、PempServer 时钟 08H 空壳 / NaN UB、PacketLogger 日切句柄泄漏、DLT645 无 ±0x33 / IEC103 应答不解析 / IEC101 SendACK 单字节 addr 等协议规范偏离）留作下一轮。
+
 ### 🩹 本轮代码审查修复（回归测试见 tests/）
 
 - **`iec104_slave` clients_ 从未注册**（C1）：SendDIActiveUpload / SendAIActiveUpload / TimerThread 都遍历 `clients_`，但 ClientThread 从未 push 任何 ClientInfo → 主动上送全部空转。修复：`clients_` 改为 `vector<shared_ptr<ClientInfo>>`；ClientThread 构造自己的 ClientInfo、进入时 push、退出时 erase；RecvFrame 增加 `peerClosedOut` 参数供 ClientThread 区分超时与断连。加 public `ClientCount()` 供测试观察。

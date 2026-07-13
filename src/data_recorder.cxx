@@ -24,6 +24,7 @@
 #include <chrono>
 #include <ctime>
 #include <cstring>
+#include <algorithm>
 
 static constexpr int SCHEMA_VERSION = 1;
 
@@ -135,11 +136,9 @@ bool DataRecorder::ExecSQLPrintLocked(const std::string& sql, const char* errTag
     return true;
 }
 
-bool DataRecorder::ExecSQLPrint(const std::string& sql, const char* errTag)
-{
-    std::lock_guard<std::mutex> lock(mysqlMtx_);
-    return ExecSQLPrintLocked(sql, errTag);
-}
+// 【注意】带锁的 ExecSQLPrint / CreateDILog 版本已删除（第二轮 CR-1）。
+// 从 EventBus handler / TimerThread 调用时先自行 lock_guard(mysqlMtx_) 再走
+// *Locked 版本。API 简化避免再次误用二次上锁。
 
 std::string DataRecorder::Escape(const std::string& s) const
 {
@@ -193,11 +192,7 @@ bool DataRecorder::CreateDILogLocked(const std::string& tableName)
     return ExecSQLPrintLocked(sql, ("建表 " + tableName).c_str());
 }
 
-bool DataRecorder::CreateDILog(const std::string& tableName)
-{
-    std::lock_guard<std::mutex> lock(mysqlMtx_);
-    return CreateDILogLocked(tableName);
-}
+// 【注意】带锁的 CreateDILog 已删除（见 ExecSQLPrint 注释）。
 
 bool DataRecorder::CreateAILog(const std::string& tableName)
 {
@@ -406,6 +401,9 @@ void DataRecorder::WriteRT(const std::string& type, const std::string& tag,
                             uint16_t ch, uint16_t dev, uint16_t pt,
                             const std::string& val, uint64_t ts_ms)
 {
+    // 【重要】调用者（On*Change / TimerThread）必须已持 mysqlMtx_。
+    // 内部一律走 *Locked 版本；用 ExecSQLPrint / CreateDILog 会导致同一线程
+    // 二次上锁非递归 mutex → UB / 死锁（第一轮 H10 修复留下的坑，第二轮 CR-1）。
     if (!mysql_ || !enabled_) return;
     std::string src = Escape(source_);
     std::string t = Escape(tag);
@@ -415,17 +413,18 @@ void DataRecorder::WriteRT(const std::string& type, const std::string& tag,
         + std::to_string(pt) + ",'" + type + "','" + Escape(val) + "',"
         + std::to_string(ts_ms)
         + ") ON DUPLICATE KEY UPDATE value=VALUES(value), ts_ms=VALUES(ts_ms), tag=VALUES(tag)";
-    ExecSQLPrint(sql, "更新 rt_status");
+    ExecSQLPrintLocked(sql, "更新 rt_status");
 }
 
 void DataRecorder::WriteDI(const DIChange& ev, const std::string& tag,
                             const std::string& oldVal)
 {
+    // 【重要】调用者（OnDIChange）必须已持 mysqlMtx_。见 WriteRT 注释。
     if (!mysql_ || !enabled_) return;
 
     std::string table = CurrentMonthTable("di_log");
-    // 确保月度表存在
-    CreateDILog(table);
+    // 确保月度表存在（Locked 版本，不重入锁）
+    CreateDILogLocked(table);
 
     std::string src = Escape(source_);
     std::string t = Escape(tag);
@@ -437,7 +436,7 @@ void DataRecorder::WriteDI(const DIChange& ev, const std::string& tag,
         + std::to_string(ev.point) + ","
         + oldVal + "," + (ev.value ? "1" : "0") + ","
         + std::to_string(ev.tsMs) + ")";
-    ExecSQLPrint(sql, "INSERT di_log");
+    ExecSQLPrintLocked(sql, "INSERT di_log");
 }
 
 void DataRecorder::WriteAI()
@@ -584,12 +583,19 @@ void DataRecorder::DropOldTables()
 
 void DataRecorder::TimerThread()
 {
+    // CR-2 修复：aiIntervalMs_ 配置为 0/负数会导致 sleep_for(0ms) 忙等
+    // 100% CPU，且下面 `120000 / aiIntervalMs_` 除零 SIGFPE。这里在线程
+    // 入口 clamp 一次，保持成员语义不变。逻辑抽到 header 便于零依赖测试。
+    const int effectiveIntervalMs = ClampAiIntervalMs(aiIntervalMs_);
+    const int cleanupPeriodTicks = ComputeCleanupPeriodTicks(effectiveIntervalMs);
     std::cout << "[DataRecorder] 定时器线程启动, AI存盘间隔="
-              << aiIntervalMs_ << "ms" << std::endl;
+              << effectiveIntervalMs << "ms"
+              << (effectiveIntervalMs != aiIntervalMs_ ? " (已 clamp)" : "")
+              << std::endl;
 
     int tickCount = 0;
     while (running_) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(aiIntervalMs_));
+        std::this_thread::sleep_for(std::chrono::milliseconds(effectiveIntervalMs));
 
         if (!running_) break;
         if (!enabled_ || !mysql_) continue;
@@ -652,8 +658,8 @@ void DataRecorder::TimerThread()
             // AI 批量存盘
             WriteAI();
 
-            // 每隔约2分钟检查一次过期表
-            if (++tickCount % (120000 / aiIntervalMs_) == 0) {
+            // 每隔约2分钟检查一次过期表（cleanupPeriodTicks 已在线程入口 clamp ≥1）
+            if (++tickCount % cleanupPeriodTicks == 0) {
                 PacketLogger::Instance().CleanupOldLogs();
                 DropOldTables();
             }

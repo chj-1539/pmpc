@@ -61,6 +61,26 @@ public:
         if (pos < static_cast<size_t>(buf[1]) + 2) return false;
         return buf[pos-1] == END;
     }
+
+    // CR-6（第二轮）修复配套：可变帧 LEN 字段值。规约要求
+    //   LEN = CTRL(1) + ADDR(2) + N_asdu = 3 + asduLen
+    // 老代码写成 `4 + asduLen` 让所有从站发出的帧多 1 字节 → CS 校验失败。
+    // 抽 inline helper 供测试断言。
+    static inline uint8_t VariableFrameLen(size_t asduLen) {
+        return static_cast<uint8_t>(3 + asduLen);
+    }
+
+    // CR-5（第二轮）修复配套：给定起始字节，判断"CTRL 从 buf 的哪个偏移读"。
+    //   固定帧: buf[0]=0x10, CTRL 在 buf[1]
+    //   可变帧: buf[0]=0x68, buf[1..3]=LEN,LEN,0x68, CTRL 在 buf[4]
+    // 老代码不分帧类型统一读 buf[1]，可变帧下会误把 LEN 当 CTRL，让
+    // LEN 低 4 位刚好 =0/A/B 时误发 Reset ACK / Class1 数据。
+    // 返回 CTRL 偏移；未知起始符返回 SIZE_MAX。
+    static inline size_t CtrlOffsetForStart(uint8_t startByte) {
+        if (startByte == 0x10) return 1;   // START_FIX
+        if (startByte == 0x68) return 4;   // START_VAR
+        return static_cast<size_t>(-1);
+    }
 private:
     void PortThread();
     void HandleFrame(CommIO& io, const uint8_t* buf, size_t len);

@@ -361,7 +361,7 @@ void Iec104Slave::ClientThread(socket clientSock) {
         if (peerClosed) break;    // C1 修复：对端 close 时退出，让下方 erase 生效
 
         if (gotFrame) {
-            if (!HandleFrame(info->sock, buf, len, info->sNr, info->rNr, currentDev)) {
+            if (!HandleFrame(*info, buf, len, currentDev)) {
                 break;
             }
         }
@@ -432,6 +432,22 @@ bool Iec104Slave::SendIFrame(socket& sock, uint32_t& sendSNr, uint32_t rNr,
     return true;
 }
 
+// CR-3 修复：ClientInfo 版 wrapper —— 持 ci.sendMtx 后再走底层 socket 发送，
+// 确保同一 client 上「主动上传 vs recv 响应 vs GI 响应」不会字节流交错。
+bool Iec104Slave::SendUFrameLocked(ClientInfo& ci, uint32_t ctrl) {
+    std::lock_guard<std::mutex> lk(ci.sendMtx);
+    return SendUFrame(ci.sock, ctrl);
+}
+bool Iec104Slave::SendSFrameLocked(ClientInfo& ci, uint32_t rNr) {
+    std::lock_guard<std::mutex> lk(ci.sendMtx);
+    return SendSFrame(ci.sock, rNr);
+}
+bool Iec104Slave::SendIFrameLocked(ClientInfo& ci,
+                                   const uint8_t* asdu, size_t asduLen) {
+    std::lock_guard<std::mutex> lk(ci.sendMtx);
+    return SendIFrame(ci.sock, ci.sNr, ci.rNr, asdu, asduLen);
+}
+
 bool Iec104Slave::RecvFrame(socket& sock, int timeoutMs, uint8_t* buf, size_t& len,
                             bool* peerClosedOut)
 {
@@ -475,9 +491,10 @@ bool Iec104Slave::RecvFrame(socket& sock, int timeoutMs, uint8_t* buf, size_t& l
 
 // ==================== Frame handling ====================
 
-bool Iec104Slave::HandleFrame(socket& sock, const uint8_t* buf, size_t len,
-                                uint32_t& sNr, uint32_t& rNr,
+bool Iec104Slave::HandleFrame(ClientInfo& ci, const uint8_t* buf, size_t len,
                                 SlaveDeviceConfig*& currentDev) {
+    // CR-3 修复：签名从裸 socket + sNr/rNr 引用改为 ClientInfo&。所有
+    // Send*Frame 都走 *Locked 版本，与主动上传路径通过 ci.sendMtx 序列化。
     uint32_t ctrl = ReadCtrl(buf);
     size_t asduLen = len > 6 ? len - 6 : 0;
     const uint8_t* asdu = buf + 6;
@@ -485,20 +502,20 @@ bool Iec104Slave::HandleFrame(socket& sock, const uint8_t* buf, size_t len,
     // U-format
     if ((ctrl & 0x03) == 0x03) {
         if (ctrl == CTRL_U_STARTDT_ACT) {
-            SendUFrame(sock, CTRL_U_STARTDT_CON);
+            SendUFrameLocked(ci, CTRL_U_STARTDT_CON);
             if (config_.verbose >= 2)
                 std::cout << "[Iec104Slave] STARTDT confirmed" << std::endl;
         } else if (ctrl == CTRL_U_STOPDT_ACT) {
-            SendUFrame(sock, CTRL_U_STOPDT_CON);
+            SendUFrameLocked(ci, CTRL_U_STOPDT_CON);
         } else if (ctrl == CTRL_U_TESTFR_ACT) {
-            SendUFrame(sock, CTRL_U_TESTFR_CON);
+            SendUFrameLocked(ci, CTRL_U_TESTFR_CON);
         }
         return true;
     }
 
     // S-format
     if ((ctrl & 0x03) == 0x01) {
-        rNr = GetRNr(ctrl);
+        ci.rNr = GetRNr(ctrl);
         return true;
     }
 
@@ -507,7 +524,7 @@ bool Iec104Slave::HandleFrame(socket& sock, const uint8_t* buf, size_t len,
     if (asduLen < 6) return true;
 
     uint32_t recvSNr = GetSNr(ctrl);
-    rNr = GetRNr(ctrl);
+    ci.rNr = GetRNr(ctrl);
     (void)recvSNr;
 
     uint8_t type = asdu[0];
@@ -527,21 +544,21 @@ bool Iec104Slave::HandleFrame(socket& sock, const uint8_t* buf, size_t len,
                              static_cast<uint8_t>(coa & 0xFF),
                              static_cast<uint8_t>((coa >> 8) & 0xFF),
                              0x00, 0x00, 0x00, 0x14};
-        SendIFrame(sock, sNr, rNr, ackAsdu, sizeof(ackAsdu));
+        SendIFrameLocked(ci, ackAsdu, sizeof(ackAsdu));
 
         // Send DI
-        BuildGIResponseDI(sock, sNr, rNr, *currentDev);
+        BuildGIResponseDI(ci, *currentDev);
         // Send AI
-        BuildGIResponseAI(sock, sNr, rNr, *currentDev);
+        BuildGIResponseAI(ci, *currentDev);
         // Send Energy
-        BuildGIResponseEnergy(sock, sNr, rNr, *currentDev);
+        BuildGIResponseEnergy(ci, *currentDev);
 
         // Activation termination
         uint8_t termAsdu[] = {IecType::C_IC_NA_1, 0x01, IecCOT::ACTIVATION_TERM, 0x00,
                               static_cast<uint8_t>(coa & 0xFF),
                               static_cast<uint8_t>((coa >> 8) & 0xFF),
                               0x00, 0x00, 0x00, 0x14};
-        SendIFrame(sock, sNr, rNr, termAsdu, sizeof(termAsdu));
+        SendIFrameLocked(ci, termAsdu, sizeof(termAsdu));
 
         if (config_.verbose >= 1)
             std::cout << "[Iec104Slave] GI response complete (COA=" << coa << ")" << std::endl;
@@ -591,7 +608,7 @@ bool Iec104Slave::HandleFrame(socket& sock, const uint8_t* buf, size_t len,
         respAsdu[p++] = asdu[6]; respAsdu[p++] = asdu[7]; respAsdu[p++] = asdu[8]; // IOA
         respAsdu[p++] = static_cast<uint8_t>(cmdVal & 0xFF);
         if (p < asduLen) respAsdu[p++] = asdu[9]; // SE
-        SendIFrame(sock, sNr, rNr, respAsdu, p);
+        SendIFrameLocked(ci, respAsdu, p);
         break;
     }
 
@@ -619,7 +636,7 @@ bool Iec104Slave::HandleFrame(socket& sock, const uint8_t* buf, size_t len,
         uint8_t respAsdu[16];
         std::memcpy(respAsdu, asdu, (asduLen < 16 ? asduLen : 16));
         respAsdu[2] = IecCOT::ACTIVATION_CON;
-        SendIFrame(sock, sNr, rNr, respAsdu, asduLen);
+        SendIFrameLocked(ci, respAsdu, asduLen);
         break;
     }
 
@@ -643,7 +660,7 @@ bool Iec104Slave::HandleFrame(socket& sock, const uint8_t* buf, size_t len,
         uint8_t respAsdu[16];
         std::memcpy(respAsdu, asdu, (asduLen < 16 ? asduLen : 16));
         respAsdu[2] = IecCOT::ACTIVATION_CON;
-        SendIFrame(sock, sNr, rNr, respAsdu, asduLen);
+        SendIFrameLocked(ci, respAsdu, asduLen);
         break;
     }
 
@@ -652,7 +669,7 @@ bool Iec104Slave::HandleFrame(socket& sock, const uint8_t* buf, size_t len,
     }
 
     // Send S-frame confirmation
-    SendSFrame(sock, recvSNr + 1);
+    SendSFrameLocked(ci, recvSNr + 1);
     return true;
 }
 
@@ -666,8 +683,7 @@ SlaveDeviceConfig* Iec104Slave::FindDevice(uint16_t commonAddr) {
 
 // ==================== ASDU building: GI response ====================
 
-void Iec104Slave::BuildGIResponseDI(socket& sock, uint32_t& sNr, uint32_t rNr,
-                                      const SlaveDeviceConfig& dev) {
+void Iec104Slave::BuildGIResponseDI(ClientInfo& ci, const SlaveDeviceConfig& dev) {
     // Batch pack: max 120 points per frame
     constexpr int MAX_PER_FRAME = 120;
     auto& mgr = RemoteDataMgr::Instance();
@@ -697,12 +713,11 @@ void Iec104Slave::BuildGIResponseDI(socket& sock, uint32_t& sNr, uint32_t rNr,
             bool val = mgr.GetDi(p.ch, p.dev, p.point, pt) && pt.value;
             asdu[pos++] = val ? 0x01 : 0x00;
         }
-        SendIFrame(sock, sNr, rNr, asdu, pos);
+        SendIFrameLocked(ci, asdu, pos);
     }
 }
 
-void Iec104Slave::BuildGIResponseAI(socket& sock, uint32_t& sNr, uint32_t rNr,
-                                      const SlaveDeviceConfig& dev) {
+void Iec104Slave::BuildGIResponseAI(ClientInfo& ci, const SlaveDeviceConfig& dev) {
     auto& mgr = RemoteDataMgr::Instance();
 
     for (auto& [ioa, ai] : dev.aiMap) {
@@ -746,12 +761,11 @@ void Iec104Slave::BuildGIResponseAI(socket& sock, uint32_t& sNr, uint32_t rNr,
             asdu[pos++] = 0x00; // QDS
         }
 
-        SendIFrame(sock, sNr, rNr, asdu, pos);
+        SendIFrameLocked(ci, asdu, pos);
     }
 }
 
-void Iec104Slave::BuildGIResponseEnergy(socket& sock, uint32_t& sNr, uint32_t rNr,
-                                          const SlaveDeviceConfig& dev) {
+void Iec104Slave::BuildGIResponseEnergy(ClientInfo& ci, const SlaveDeviceConfig& dev) {
     auto& mgr = RemoteDataMgr::Instance();
 
     for (auto& [ioa, en] : dev.energyMap) {
@@ -779,7 +793,7 @@ void Iec104Slave::BuildGIResponseEnergy(socket& sock, uint32_t& sNr, uint32_t rN
         asdu[pos++] = static_cast<uint8_t>((cLow >> 24) & 0xFF);
         asdu[pos++] = 0x00; // QDS
 
-        SendIFrame(sock, sNr, rNr, asdu, pos);
+        SendIFrameLocked(ci, asdu, pos);
     }
 }
 
@@ -852,11 +866,18 @@ void Iec104Slave::SendDIActiveUpload(const DIChange& ev) {
                     PackCP56Time2a(asdu, pos);
                 }
 
-                // Send to all connected clients
-                std::lock_guard<std::mutex> lock(clientsMtx_);
-                for (auto& cl : clients_) {
+                // CR-3 修复：锁内只做 clients_ 的快照，锁外再发送 —
+                // 一个慢客户端的 send 阻塞不再让 clientsMtx_ 卡住其他
+                // handler 和 accept。逐 client 的 sendMtx 由 SendIFrameLocked
+                // 保护，防止与 ClientThread 的 recv 响应交错。
+                std::vector<std::shared_ptr<ClientInfo>> snapshot;
+                {
+                    std::lock_guard<std::mutex> lock(clientsMtx_);
+                    snapshot = clients_;
+                }
+                for (auto& cl : snapshot) {
                     try {
-                        SendIFrame(cl->sock, cl->sNr, cl->rNr, asdu, pos);
+                        SendIFrameLocked(*cl, asdu, pos);
                     } catch (...) {}
                 }
                 return;
@@ -886,10 +907,15 @@ void Iec104Slave::SendAIActiveUpload(const AIChange& ev, uint32_t ioa,
         PackNormalizedASDU(asdu, pos, engVal, ioa, ai.scale);
     }
 
-    std::lock_guard<std::mutex> lock(clientsMtx_);
-    for (auto& cl : clients_) {
+    // CR-3 修复：同 SendDIActiveUpload，锁内只快照。
+    std::vector<std::shared_ptr<ClientInfo>> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(clientsMtx_);
+        snapshot = clients_;
+    }
+    for (auto& cl : snapshot) {
         try {
-            SendIFrame(cl->sock, cl->sNr, cl->rNr, asdu, pos);
+            SendIFrameLocked(*cl, asdu, pos);
         } catch (...) {}
     }
 }
@@ -908,11 +934,16 @@ void Iec104Slave::TimerThread() {
 
         // Check if need to send cycle AI
         // Simplified: traverse all AI points for all clients on each tick
+        // CR-3 修复：锁内只快照 clients_，然后锁外发送；每 client 的
+        // SendIFrameLocked 各自持自己的 sendMtx 与 ClientThread 同步。
+        std::vector<std::shared_ptr<ClientInfo>> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(clientsMtx_);
+            snapshot = clients_;
+        }
         {
             uint8_t asdu[32];
-            std::lock_guard<std::mutex> lock(clientsMtx_);
-
-            for (auto& cl : clients_) {
+            for (auto& cl : snapshot) {
                 for (auto& dev : config_.devices) {
                     for (auto& [ioa, ai] : dev.aiMap) {
                         AiPoint pt;
@@ -935,7 +966,7 @@ void Iec104Slave::TimerThread() {
                         }
 
                         try {
-                            SendIFrame(cl->sock, cl->sNr, cl->rNr, asdu, pos);
+                            SendIFrameLocked(*cl, asdu, pos);
                         } catch (...) {}
                     }
                 }

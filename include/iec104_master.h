@@ -213,6 +213,13 @@ public:
     static inline uint32_t EncodeIFrameCtrl(uint32_t sNr, uint32_t rNr) {
         return ((sNr & 0x7FFF) << 1) | ((rNr & 0x7FFF) << 17);
     }
+    // CR-4（第二轮）修复：S 帧 ctrl = 0x01 | (rNr[31:17]<<17)。
+    // 老代码把 rNr 硬编码为 0（`ctrl = 0x00010000`，等价 rNr=0 但 bit16 也
+    // 置 1 - 位错乱），主站从不确认收到的 I 帧。严格从站在 k=12 未确认后
+    // 拒绝继续发 I 帧。inline 便于直接测试。
+    static inline uint32_t EncodeSFrameCtrl(uint32_t rNr) {
+        return 0x01 | ((rNr & 0x7FFF) << 17);
+    }
     static inline uint32_t DecodeSendSeq(uint32_t ctrl) { return (ctrl >> 1)  & 0x7FFF; }
     static inline uint32_t DecodeRecvSeq(uint32_t ctrl) { return (ctrl >> 17) & 0x7FFF; }
 
@@ -250,12 +257,12 @@ private:
     // SendIFrame 现在接收 sendSeq/recvSeq 引用，写入 ctrl 并把 sendSeq +1。
     bool SendIFrame(socket& sock, const uint8_t* asdu, size_t asduLen,
                     uint32_t& sendSeq, uint32_t recvSeq);
-    bool SendSFrame(socket& sock);
+    bool SendSFrame(socket& sock, uint32_t recvSeq);
     bool RecvFrame(socket& sock, int timeoutMs, uint8_t* buf, size_t& len);
     bool HandleUFrame(uint32_t ctrl);
     bool HandleSFrame(uint32_t ctrl);
     bool HandleIFrame(socket& sock, const uint8_t* asdu, size_t asduLen,
-                      int chIdx, const IEC104DeviceConfig* dev);
+                      int chIdx, const IEC104DeviceConfig* dev, uint32_t recvSeq);
 
     // ── ASDU 处理 ──
     void HandleTotalInterrogation(socket& sock, const uint8_t* asdu, size_t asduLen,

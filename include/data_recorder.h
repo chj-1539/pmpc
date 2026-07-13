@@ -15,6 +15,7 @@
 
 #include "module_manager.h"
 #include "event_bus.h"
+#include "data_recorder_helpers.h"
 #include <mysql.h>
 #include <string>
 #include <vector>
@@ -64,6 +65,15 @@ class DataRecorder {
 public:
     static DataRecorder& Instance();
 
+    // ── TimerThread 配置健壮化辅助（CR-2 修复配套；实现见
+    //    data_recorder_helpers.h，让测试可零依赖调用）──
+    static inline int ClampAiIntervalMs(int cfg) {
+        return pmpc::data_recorder::ClampAiIntervalMs(cfg);
+    }
+    static inline int ComputeCleanupPeriodTicks(int effectiveIntervalMs) {
+        return pmpc::data_recorder::ComputeCleanupPeriodTicks(effectiveIntervalMs);
+    }
+
     bool Init(const std::string& iniPath);
     void Stop();
     bool IsConnected() const { return connected_; }
@@ -89,13 +99,11 @@ private:
     bool ConnectMySQL();
     void DisconnectMySQL();
     bool ExecSQL(const std::string& sql);
-    bool ExecSQLPrint(const std::string& sql, const char* errTag);
     bool ExecSQLPrintLocked(const std::string& sql, const char* errTag); // 调用方需已持 mysqlMtx_
 
     // ── 建表 ──
     bool CreateTables();
     bool CreateRTStatus();
-    bool CreateDILog(const std::string& tableName);
     bool CreateDILogLocked(const std::string& tableName); // 调用方需已持 mysqlMtx_
     bool CreateAILog(const std::string& tableName);
     bool CreateInstanceTable();
