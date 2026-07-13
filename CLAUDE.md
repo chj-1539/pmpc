@@ -238,6 +238,8 @@ SOE 帧单条记录格式（12 字节）：`CH(1) | DEV(1) | SOE_ID(2小端) | m
 
 ### 🩹 本轮代码审查修复（回归测试见 tests/）
 
+- **`iec104_slave` clients_ 从未注册**（C1）：SendDIActiveUpload / SendAIActiveUpload / TimerThread 都遍历 `clients_`，但 ClientThread 从未 push 任何 ClientInfo → 主动上送全部空转。修复：`clients_` 改为 `vector<shared_ptr<ClientInfo>>`；ClientThread 构造自己的 ClientInfo、进入时 push、退出时 erase；RecvFrame 增加 `peerClosedOut` 参数供 ClientThread 区分超时与断连。加 public `ClientCount()` 供测试观察。
+
 - **`cdt_master.cxx` 同步头判断被注释吞掉**（C2）：`if (pos==0 && byte != SYNC_BYTE)` 写进了 `//` 单行注释里，pos=0 时任意字节都会写入 buf[0]。已抽出 `CdtMaster::AdvanceSyncHeader` 纯函数并让 `PortThread` 复用。
 - **`event_bus.h` 缺 `<algorithm>`**（C6）：`Unsubscribe` 用 `std::remove_if` 却未包含该头文件，只通过传递包含才能编译。已直接 include。
 - **Set{Ai,DoMaster,DoSlave,Ao} 无差别发布 EventBus**（C3）：与 SetDi 不一致，每次调用都发事件，会灌爆 data_recorder / iec104_slave 等订阅者。修复为 `oldVal != val` 门控。
