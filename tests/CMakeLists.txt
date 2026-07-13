@@ -264,6 +264,24 @@ add_pmpc_test(test_iec101_slave_framing test_iec101_slave_framing.cxx)
 # M2: iec104_master I 帧序号编解码（EncodeIFrameCtrl 等已 inline）
 add_pmpc_test(test_iec104_master_seqnum test_iec104_master_seqnum.cxx)
 
+# C1: iec104_slave 客户端注册（ClientThread 应把自己 push 进 clients_）
+add_pmpc_test(test_iec104_slave_client_registration test_iec104_slave_client_registration.cxx
+    ${CMAKE_SOURCE_DIR}/src/iec104_slave.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_data_mgr.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_config_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/ini_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/soe_queue.cxx
+    ${CMAKE_SOURCE_DIR}/src/protocol.cxx
+    ${CMAKE_SOURCE_DIR}/src/packet_logger.cxx
+    ${CMAKE_SOURCE_DIR}/src/module_manager.cxx
+    ${CMAKE_SOURCE_DIR}/src/modbus_tcp_master.cxx
+    ${CMAKE_SOURCE_DIR}/src/pemp_server.cxx
+    ${CMAKE_SOURCE_DIR}/src/redundancy.cxx
+    ${CMAKE_SOURCE_DIR}/src/iec104_master.cxx
+    ${CMAKE_SOURCE_DIR}/src/socket.cpp
+    ${CMAKE_SOURCE_DIR}/src/serial_port.cpp
+)
+
 # H5: iec104_slave 遥控 fallback 修复回归（DecideRemoteControlTargets 已 inline）
 add_pmpc_test(test_iec104_slave_remote_ctrl test_iec104_slave_remote_ctrl.cxx)
 

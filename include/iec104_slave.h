@@ -170,7 +170,11 @@ private:
     bool SendSFrame(socket& sock, uint32_t rNr);
     bool SendIFrame(socket& sock, uint32_t& sNr, uint32_t rNr,
                     const uint8_t* asdu, size_t asduLen);
-    bool RecvFrame(socket& sock, int timeoutMs, uint8_t* buf, size_t& len);
+    // peerClosedOut（可选）：调用者可判断 return false 的原因
+    //   *peerClosedOut = true → recv 返回 0，对端正常 close，socket 已被本地关闭
+    //   *peerClosedOut = false → 超时或帧格式错，socket 仍可用
+    bool RecvFrame(socket& sock, int timeoutMs, uint8_t* buf, size_t& len,
+                   bool* peerClosedOut = nullptr);
 
     // ── 帧处理 ──
     bool HandleFrame(socket& sock, const uint8_t* buf, size_t len,
@@ -227,8 +231,21 @@ private:
         uint32_t sNr = 0;
         uint32_t rNr = 0;
     };
-    std::vector<ClientInfo> clients_;
-    std::mutex clientsMtx_;
+    // C1 修复：clients_ 之前是 vector<ClientInfo>（value 类型），但没人 push
+    // 进去。改为 shared_ptr 让 ClientThread 直接构造 + 注册；主动上传路径
+    // (SendDIActiveUpload / SendAIActiveUpload / TimerThread) 遍历时也拿到
+    // 稳定引用，vector 扩容不失效。
+    std::vector<std::shared_ptr<ClientInfo>> clients_;
+    mutable std::mutex clientsMtx_;
+
+    // C1 修复回归用：ClientThread 会把自己注册进 clients_、退出时移除。
+    // 该 accessor 让 tests/test_iec104_slave_client_registration.cxx 断言。
+public:
+    size_t ClientCount() const {
+        std::lock_guard<std::mutex> lk(clientsMtx_);
+        return clients_.size();
+    }
+private:
 };
 
 // H5：inline 定义在类外，测试文件仅 include 头文件即可直接调用

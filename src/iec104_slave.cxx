@@ -260,7 +260,7 @@ void Iec104Slave::Stop() {
     {
         std::lock_guard<std::mutex> lock(clientsMtx_);
         for (auto& c : clients_)
-            try { c.sock.close(); } catch (...) {}
+            try { c->sock.close(); } catch (...) {}
         clients_.clear();
     }
     {
@@ -331,16 +331,26 @@ void Iec104Slave::ClientThread(socket clientSock) {
         clientSock.set_recv_timeout(std::chrono::milliseconds(RECV_TIMEOUT_MS));
     } catch (...) {}
 
-    uint32_t sNr = 0, rNr = 0;
+    // C1 修复：把这条 client 连接注册进 clients_，让 active/cycle upload 能
+    // 找到它。用 shared_ptr 保证下面 recv/send 循环拿到的 &sNr, &rNr 与
+    // 主动上传遍历时看到的是同一份状态。
+    auto info = std::make_shared<ClientInfo>();
+    info->sock = std::move(clientSock);
+    {
+        std::lock_guard<std::mutex> lk(clientsMtx_);
+        clients_.push_back(info);
+    }
+
     SlaveDeviceConfig* currentDev = nullptr;
     uint8_t buf[RECV_BUF];
 
     while (running_) {
         size_t len = 0;
         bool gotFrame = false;
+        bool peerClosed = false;
 
         try {
-            gotFrame = RecvFrame(clientSock, 1000, buf, len);
+            gotFrame = RecvFrame(info->sock, 1000, buf, len, &peerClosed);
         } catch (const socket_error& e) {
             if (e.code() == socket_errc::timeout) {
                 gotFrame = false;
@@ -348,14 +358,23 @@ void Iec104Slave::ClientThread(socket clientSock) {
                 break;
             }
         }
+        if (peerClosed) break;    // C1 修复：对端 close 时退出，让下方 erase 生效
 
         if (gotFrame) {
-            if (!HandleFrame(clientSock, buf, len, sNr, rNr, currentDev)) {
+            if (!HandleFrame(info->sock, buf, len, info->sNr, info->rNr, currentDev)) {
                 break;
             }
         }
 
         if (!running_) break;
+    }
+
+    // C1 修复：退出前把这条 client 从 clients_ 里删掉，避免主动上传路径
+    // 继续尝试往已关闭的 socket 写。
+    {
+        std::lock_guard<std::mutex> lk(clientsMtx_);
+        clients_.erase(std::remove(clients_.begin(), clients_.end(), info),
+                       clients_.end());
     }
 
     if (config_.verbose >= 1)
@@ -413,12 +432,21 @@ bool Iec104Slave::SendIFrame(socket& sock, uint32_t& sendSNr, uint32_t rNr,
     return true;
 }
 
-bool Iec104Slave::RecvFrame(socket& sock, int timeoutMs, uint8_t* buf, size_t& len) {
+bool Iec104Slave::RecvFrame(socket& sock, int timeoutMs, uint8_t* buf, size_t& len,
+                            bool* peerClosedOut)
+{
+    if (peerClosedOut) *peerClosedOut = false;
     sock.set_recv_timeout(std::chrono::milliseconds(timeoutMs));
 
-    if (sock.recv(buf, 1) != 1) return false;
+    if (sock.recv(buf, 1) != 1) {
+        if (peerClosedOut) *peerClosedOut = true;   // recv 返回 0 → EOF
+        return false;
+    }
     if (buf[0] != FRAME_START) return false;
-    if (sock.recv(buf + 1, 1) != 1) return false;
+    if (sock.recv(buf + 1, 1) != 1) {
+        if (peerClosedOut) *peerClosedOut = true;
+        return false;
+    }
 
     uint8_t apduLen = buf[1];
     if (apduLen < 4 || apduLen > 253) {
@@ -434,7 +462,10 @@ bool Iec104Slave::RecvFrame(socket& sock, int timeoutMs, uint8_t* buf, size_t& l
     size_t total = 0;
     while (total < remaining) {
         size_t n = sock.recv(buf + 2 + total, remaining - total);
-        if (n == 0) return false;
+        if (n == 0) {
+            if (peerClosedOut) *peerClosedOut = true;
+            return false;
+        }
         total += n;
     }
     len = 2 + remaining;
@@ -825,7 +856,7 @@ void Iec104Slave::SendDIActiveUpload(const DIChange& ev) {
                 std::lock_guard<std::mutex> lock(clientsMtx_);
                 for (auto& cl : clients_) {
                     try {
-                        SendIFrame(cl.sock, cl.sNr, cl.rNr, asdu, pos);
+                        SendIFrame(cl->sock, cl->sNr, cl->rNr, asdu, pos);
                     } catch (...) {}
                 }
                 return;
@@ -858,7 +889,7 @@ void Iec104Slave::SendAIActiveUpload(const AIChange& ev, uint32_t ioa,
     std::lock_guard<std::mutex> lock(clientsMtx_);
     for (auto& cl : clients_) {
         try {
-            SendIFrame(cl.sock, cl.sNr, cl.rNr, asdu, pos);
+            SendIFrame(cl->sock, cl->sNr, cl->rNr, asdu, pos);
         } catch (...) {}
     }
 }
@@ -904,7 +935,7 @@ void Iec104Slave::TimerThread() {
                         }
 
                         try {
-                            SendIFrame(cl.sock, cl.sNr, cl.rNr, asdu, pos);
+                            SendIFrame(cl->sock, cl->sNr, cl->rNr, asdu, pos);
                         } catch (...) {}
                     }
                 }

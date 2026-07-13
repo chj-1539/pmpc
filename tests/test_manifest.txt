@@ -47,6 +47,7 @@ test_redundancy_loadconfig      | test_redundancy_loadconfig.cxx      | src/redu
 test_pemp_server_stop_lifecycle | test_pemp_server_stop_lifecycle.cxx | src/pemp_server.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/socket.cpp
 test_iec101_slave_framing       | test_iec101_slave_framing.cxx       |
 test_iec104_master_seqnum       | test_iec104_master_seqnum.cxx       |
+test_iec104_slave_client_registration | test_iec104_slave_client_registration.cxx | src/iec104_slave.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/packet_logger.cxx src/module_manager.cxx src/modbus_tcp_master.cxx src/pemp_server.cxx src/redundancy.cxx src/iec104_master.cxx src/socket.cpp src/serial_port.cpp
 #
 # === Phase 3: 协议主站测试 (待添加) ===
 #
