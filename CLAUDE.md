@@ -236,6 +236,33 @@ SOE 帧单条记录格式（12 字节）：`CH(1) | DEV(1) | SOE_ID(2小端) | m
 - **TCP socket 超时 vs 断开**：`set_recv_timeout` 设超时后，`::recv` 在 Windows 上返回 `SOCKET_ERROR`（WSAETIMEDOUT → 抛异常），在 POSIX 上返回 -1（EAGAIN）。recv 返回 0 才是对端正常关闭。代码中异常和返回值需分别处理，不可混为一谈。
 - **WriteDOChanges/WriteAOChanges `lastMaster`/`lastVal` 冲突**（`modbus_tcp_master.cxx`，`modbus_rtu_master.cxx`）：原代码通过对比 `DoPoint::lastMaster` / `AoPoint::lastVal` 判断值是否变化。但 `CheckAllPointChange()`（200ms 周期）会将这两个字段同步为当前值，抢在 master 模块的采集循环（500ms 以上周期）之前，导致变化检测永远认为"无变化" → 不写回。修复为模块级 `doSent_`/`aoSent_` 独立追踪上次已发值。已修复。
 
+### 🩹 本轮代码审查修复（回归测试见 tests/）
+
+- **`cdt_master.cxx` 同步头判断被注释吞掉**（C2）：`if (pos==0 && byte != SYNC_BYTE)` 写进了 `//` 单行注释里，pos=0 时任意字节都会写入 buf[0]。已抽出 `CdtMaster::AdvanceSyncHeader` 纯函数并让 `PortThread` 复用。
+- **`event_bus.h` 缺 `<algorithm>`**（C6）：`Unsubscribe` 用 `std::remove_if` 却未包含该头文件，只通过传递包含才能编译。已直接 include。
+- **Set{Ai,DoMaster,DoSlave,Ao} 无差别发布 EventBus**（C3）：与 SetDi 不一致，每次调用都发事件，会灌爆 data_recorder / iec104_slave 等订阅者。修复为 `oldVal != val` 门控。
+- **Redundancy 心跳缺 peerPriority**（C4）：帧只 role+ts，`peerPriority_` 永远为 0，双主优先级决策失效。已扩帧格式 LEN=8→11，向前兼容老 14 字节格式。同时把帧编解码 + `DecideRole` 抽为 `pmpc::redundancy` 命名空间的自由函数。
+- **PempServer 忽略遥控密码**（M3）：`(void)pwdLen` 丢弃密码字段。新增 `rcPassword_` 成员 + `[global] rc_password` ini 配置；空密码保留老行为兼容。
+- **PempServer CH/DEV 8 位截断**（H2）：规约限制 1..255；`chId & 0xFF` 让 chId=256 与 chId=0 撞车。改为 log 警告 + 跳过。
+- **PempServer AI double→int32 未 clamp**（H3）：`static_cast<int32_t>(v)` 对 |v|>2^31−1 是 UB。新增 `QuantizeAiToInt32Warn` 做 clamp 到 INT32_MIN/MAX，首次警告去重。
+- **PempServer SOE 发送失败即丢**（H1）：`PopAll()` 后 send 失败 events 就永久消失。新增 `SOEQueue::PushFrontBatch` 保序回填，失败时 events 回队。
+- **DebugConsole `StopAutoTask` 死锁**（M8）：持 `autoMtx_` 后 `join()` 工作线程；后者每轮循环也抢 `autoMtx_`。抽出 `DetachTaskLocked` / `DetachAllTasksLocked` 静态模板：锁内标记 + 移出，锁外 join。
+- **`pmpc_config_reader.cxx` uint16 溢出**（M13）：`for (uint16_t i=1; i<=diCnt+1; i++)` 在 `diCnt=65535` 时 `diCnt+1` 回绕到 0，循环不执行。修为 uint32 循环变量 + 上限 `diCnt≤65534`（pt=1 保留给通讯状态位）。
+- **`iec104_slave` 遥控 fallback 到 doMap[0]**（H5）：cmdVal 不匹配任何 mapping 时错误地写第一条 entry。抽 `DecideRemoteControlTargets` 纯函数，只返回严格匹配；不匹配走 COT.P/N=1 negative ack。
+- **`iec101_master` 硬编码 SetDi(chId=1, ...)**（M11）：`HandleGIResponse` 遍历所有 channels 用 coa 匹配，且硬编码 chId=1，多通道下相互覆盖。加 chIdx 参数、按通道路由 chId=(chIdx+1)。
+- **`iec104_master`/`slave` RecvFrame apduLen 无效未排空 socket**（M12）：非法 apduLen 后返回 false 但残余字节留在流里 → 下次误当帧头。改为 shutdown+close，让上层重连。
+- **`iec104_slave` client 线程 `joinable()` 判定错**（M4）：joinable() 对 return 后未 join 的线程仍为 true → cleanup 分支永远不走，clientThreads_ 只增不减。加显式 done 标志 + `CleanupFinishedClientThreads` helper。
+- **`filter_telnet_iac` 无状态跨包丢字节**（H7）：一个 IAC 序列跨两次 recv() 时末尾裸 0xFF 被 break 丢，选项字节泄入命令流。重写为 `pmpc::TelnetIacFilter` 状态机，`DebugConsole::ClientThread` 每连接持一份实例。
+- **Modbus AO 固定 epsilon 0.001**（H9）：对量程 1e9 附近浮点噪声 >0.001，重复发送；对 1e-6 附近漏发。改为混合容差 `AoAlmostEqual(a, b, absTol=1e-6, relTol=1e-4)`。
+- **`pmpc_config_reader.cxx` 重复 [Channel_N] 段静默合并**（L4）：产生两个同 chId 的 Channel，`FindCh` 只返回首个 → 后续段成"死"数据。改为拒绝第二个及以后同名段，报 error。
+- **`RedundancyManager::LoadConfig` 文件缺失时 return true**（L5）：默认 `peerIp_=127.0.0.1` → 两台机器裸上生产互相 localhost 撞车。改为 return false，让 ModuleManager 跳过 redundancy 模块。
+- **`PempServer::stop` 用 detach 而非 join**（L6）：detach 后 `delete server` 触发被 detach 线程的 UAF。client_handler 已有 500ms recv 超时，join 是安全的。
+- **`iec101_slave` PortThread 接受 LEN=0 的可变帧**（L11）：`[0x68, 0x00, 0x16]` 会通过 `pos>=buf[1]+2 && buf[pos-1]==END` 判定进入 HandleFrame。抽 `IsCompleteFixedFrame` / `IsCompleteVariableFrame` inline helper，要求 LEN≥4。
+- **`Iec104Master` I 帧 ctrl 恒为 0**（M2）：严格从站在 k=12 未确认后拒绝后续 I 帧。新增 `EncodeIFrameCtrl(sNr, rNr)` 纯函数，`SendIFrame` 接收 sendSeq/recvSeq 引用；ChannelThread 每连接维护、每收 I 帧 recvSeq++。
+- **Modbus master `if (qty<maxQty) qty=maxQty` 死代码**（H6）：`qty = maxAddr-minAddr+1` 数学上已 ≥ 任何单条 qty；fallback 永远不生效。删除死代码并抽 `ComputeAddrSpan` 模板做不变式测试。
+- **`main.cxx` CheckAllPointChange 无异常保护**（L17）：一次 lambda 抛异常就杀进程。加 try/catch 记 stderr 继续。
+
+
 ### 新增模块 checklist
 
 1. 创建 `class XxxModule : public AppModule`，实现 6 个纯虚方法

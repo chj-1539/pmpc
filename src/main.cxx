@@ -99,7 +99,19 @@ int main(int argc, char* argv[])
     // 主循环
     std::cout << "\n主循环开始...\n" << std::endl;
     auto& mgr = RemoteDataMgr::Instance();
-    while (g_running) { mgr.CheckAllPointChange(); std::this_thread::sleep_for(std::chrono::milliseconds(200)); }
+    while (g_running) {
+        // L17 修复：外围 try/catch 防止 CheckAllPointChange 内部 lambda 抛出
+        // 未捕获异常时直接杀掉进程。任何异常都记 stderr 后继续。
+        try {
+            mgr.CheckAllPointChange();
+        } catch (const std::exception& e) {
+            std::cerr << "[main] CheckAllPointChange 异常: " << e.what()
+                      << "（已忽略，主循环继续）" << std::endl;
+        } catch (...) {
+            std::cerr << "[main] CheckAllPointChange 未知异常（已忽略，主循环继续）" << std::endl;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
 
     std::cout << "\n正在停止所有模块..." << std::endl;
     modules.StopAll();
