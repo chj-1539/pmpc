@@ -163,6 +163,10 @@ bool RemoteDataMgr::GetAoList(uint16_t ch, uint16_t dev, std::vector<AoPoint>& o
 bool RemoteDataMgr::SetDi(uint16_t ch, uint16_t dev, uint16_t pt,
                           bool val, uint64_t ts, bool /*change*/)
 {
+    // H8 修复：pt≠1 (业务点) 时若 ts==0，说明调用方忘传时间戳；用 NowMs()
+    // 补上，避免 data_recorder 把 ts_ms=0 写进 rt_status/di_log。pt=1 是
+    // 通讯状态位，允许 ts=0（不发 DIChange，也不入 recorder，见 bug #2）。
+    if (pt != 1 && ts == 0) ts = NowMs();
     bool shouldPublish = false;
     DIChange ev{};
     bool found = WithDeviceLocked(ch, dev, [&](Device& pDev) -> bool {

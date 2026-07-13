@@ -275,6 +275,15 @@ add_pmpc_test(test_redundancy_role_concurrent test_redundancy_role_concurrent.cx
     ${CMAKE_SOURCE_DIR}/src/socket.cpp
 )
 
+# H8: RemoteDataMgr::SetDi 业务点 ts=0 时自动填 NowMs
+add_pmpc_test(test_data_mgr_ts_defense test_data_mgr_ts_defense.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_data_mgr.cxx
+    ${CMAKE_SOURCE_DIR}/src/pmpc_config_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/ini_reader.cxx
+    ${CMAKE_SOURCE_DIR}/src/soe_queue.cxx
+    ${CMAKE_SOURCE_DIR}/src/protocol.cxx
+)
+
 # C1: iec104_slave 客户端注册（ClientThread 应把自己 push 进 clients_）
 add_pmpc_test(test_iec104_slave_client_registration test_iec104_slave_client_registration.cxx
     ${CMAKE_SOURCE_DIR}/src/iec104_slave.cxx
