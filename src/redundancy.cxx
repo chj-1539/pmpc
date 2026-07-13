@@ -348,13 +348,20 @@ void RedundancyManager::CheckFailover(){
     }
 }
 void RedundancyManager::SetRole(RedundRole nr){
+    // C5 修复：并发进入的两个 SetRole 应互相 serialize，且用同一把锁保护
+    // 状态检查+转换，避免"两个线程都看到 role_==Idle 都启动 syncChannel_"
+    // 之类的双启动。roleMtx_ 与 hbMtx_ 无嵌套：SetRole 不会持 roleMtx_ 时
+    // 反向抓 hbMtx_，因为 syncChannel_.Start*/Stop 不使用 hbMtx_。
+    std::lock_guard<std::mutex> lock(roleMtx_);
     if(role_==nr)return;
     RedundRole or_=role_;role_=nr;
     std::cout<<"\n*** "<<RoleName(or_)<<" -> "<<RoleName(nr)<<" ***\n"<<std::endl;
+    // 切换角色前先 Stop 现有 syncChannel_（如果 Idle→X 就是空操作，本来就没启动）
+    syncChannel_.Stop();
     if(nr==RedundRole::Master){syncChannel_.StartMaster(syncPort_);syncChannel_.SetChangeCallback(nullptr);}
     else if(nr==RedundRole::Standby){syncChannel_.StartStandby(peerIp_,syncPort_);
         syncChannel_.SetChangeCallback([this](const ChangeEvent&ev){OnSyncData((ChangeEvent::Type)ev.type,ev.channel,ev.device,ev.point,ev.value,ev.dvalue);});}
-    else syncChannel_.Stop();
+    // else Idle: Stop 已上面调过
     if(collectCb_)collectCb_(nr==RedundRole::Master);
     if(roleCb_)roleCb_(or_,nr);
 }

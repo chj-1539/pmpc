@@ -195,6 +195,10 @@ private:
     socket hbListenSock_;
     socket hbSendSock_;
     std::mutex hbMtx_;          ///< 保护 hbSendSock_ 的并发访问
+    // C5 修复：CheckFailover（心跳线程）和 RequestRoleChange（debug_console
+    // 线程）都会调 SetRole；未加锁时可能并发进入并同时启动 syncChannel_，
+    // 线程 / socket 泄漏。roleMtx_ 序列化 SetRole。
+    std::mutex roleMtx_;
     std::thread hbSendThr_;
     std::thread hbListenThr_;
     SyncChannel syncChannel_;
