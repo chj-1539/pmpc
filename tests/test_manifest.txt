@@ -54,6 +54,9 @@ test_data_recorder_helpers      | test_data_recorder_helpers.cxx      |
 test_iec104_master_sframe_ctrl  | test_iec104_master_sframe_ctrl.cxx  |
 test_iec101_slave_frame_layout  | test_iec101_slave_frame_layout.cxx  |
 test_data_recorder_atomic       | test_data_recorder_atomic.cxx       |
+test_dlt645_frame_codec         | test_dlt645_frame_codec.cxx         |
+test_iec103_master_frame        | test_iec103_master_frame.cxx        |
+test_iec101_slave_send_ack      | test_iec101_slave_send_ack.cxx      |
 #
 # === Phase 3: 协议主站测试 (待添加) ===
 #

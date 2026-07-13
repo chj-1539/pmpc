@@ -81,6 +81,29 @@ public:
         if (startByte == 0x68) return 4;   // START_VAR
         return static_cast<size_t>(-1);
     }
+
+    // 101-C（第二轮）修复配套：SendACK 生成的固定帧字节序列。规约要求
+    //   [0x10 CTRL ADDR_L ADDR_H CS 0x16]  共 6 字节
+    //   CS = CTRL + ADDR_L + ADDR_H（3 字节 mod 256）
+    // 老代码只写 1 字节 addr（5 字节帧），可变帧却写 2 字节 → 位宽不一致；
+    // 且 linkAddr > 255 时高字节丢失。inline helper 供测试断言字节布局，
+    // 与生产 SendACK 共享同一 CalcCS。
+    static inline void BuildFixedAck(uint16_t linkAddr, uint8_t out[6]) {
+        constexpr uint8_t START_FIX = 0x10;
+        constexpr uint8_t END       = 0x16;
+        out[0] = START_FIX;
+        out[1] = 0x03;                                          // CTRL: primary+fun=3 (ACK)
+        out[2] = static_cast<uint8_t>(linkAddr & 0xFF);         // ADDR low
+        out[3] = static_cast<uint8_t>((linkAddr >> 8) & 0xFF);  // ADDR high
+        out[4] = CalcCS(out + 1, 3);                            // CS covers CTRL+ADDR_L+ADDR_H
+        out[5] = END;
+    }
+    // 供 BuildFixedAck 复用，与 iec101_slave.cxx 里的 static CalcCS 语义一致
+    static inline uint8_t CalcCS(const uint8_t* data, size_t len) {
+        uint8_t cs = 0;
+        for (size_t i = 0; i < len; i++) cs = static_cast<uint8_t>(cs + data[i]);
+        return cs;
+    }
 private:
     void PortThread();
     void HandleFrame(CommIO& io, const uint8_t* buf, size_t len);
@@ -88,7 +111,8 @@ private:
     void SendACK(CommIO& io, uint16_t linkAddr);
     bool FindAndExecDO(const uint8_t* asdu, size_t len);
 
-    static uint8_t CalcCS(const uint8_t* data, size_t len);
+    // CalcCS 已在 public 段定义为 inline —— 101-C 修复配套让 BuildFixedAck
+    // 也能零依赖调用。私有段的重复声明已删除。
     static int SafeStoi(const std::string& s, int def = 0);
 
     Slave101Config config_; std::atomic<bool> running_{false}; std::thread portThr_;

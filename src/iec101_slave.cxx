@@ -21,9 +21,8 @@ constexpr uint8_t IEC101_START_FIX = 0x10;
 constexpr uint8_t IEC101_END = 0x16;
 
 int Iec101Slave::SafeStoi(const std::string& s, int def) { try { return std::stoi(s); } catch (...) { return def; } }
-uint8_t Iec101Slave::CalcCS(const uint8_t* data, size_t len) {
-    uint8_t cs = 0; for (size_t i = 0; i < len; i++) cs = (uint8_t)(cs + data[i]); return cs;
-}
+// CalcCS 已在 iec101_slave.h 中 inline 实现（101-C 修复配套）；此处 .cxx
+// 定义已删除，避免重复符号。
 
 Iec101Slave::Iec101Slave() {}
 Iec101Slave::~Iec101Slave() { Stop(); }
@@ -44,7 +43,15 @@ bool Iec101Slave::LoadConfig(const std::string& path) {
         if (!StartsWith(low, "device_")) continue;
 
         Slave101DeviceConfig dev;
-        dev.linkAddr = (uint16_t)ini.GetInt(sec, "link_addr", 1);
+        // 101-C（第二轮）修复：linkAddr 是 16 位，规约允许 0..65535。
+        // 若 ini 配 > 65535 会 truncate（uint16_t 强转）→ 与主站预期不符。
+        // 加显式警告让配置错误早暴露。
+        int linkAddrRaw = ini.GetInt(sec, "link_addr", 1);
+        if (linkAddrRaw < 0 || linkAddrRaw > 65535) {
+            std::cerr << "[Iec101Slave] [" << sec << "] link_addr=" << linkAddrRaw
+                      << " 超出 16 位范围 (0..65535)，将被截断" << std::endl;
+        }
+        dev.linkAddr = static_cast<uint16_t>(linkAddrRaw & 0xFFFF);
         dev.coa = (uint16_t)ini.GetInt(sec, "common_addr", 1);
         dev.desc = ini.Get(sec, "desc", "");
         for (auto& k : ini.Keys(sec)) {
@@ -90,8 +97,18 @@ bool Iec101Slave::Start() {
 void Iec101Slave::Stop() { running_ = false; EventBus::Unsubscribe<DIChange>(tokenDI_); if (portThr_.joinable()) portThr_.join(); }
 
 void Iec101Slave::SendACK(CommIO& io, uint16_t linkAddr) {
-    uint8_t frame[] = { IEC101_START_FIX, 0x03, (uint8_t)(linkAddr & 0xFF), 0x00, IEC101_END };
-    frame[3] = CalcCS(frame + 1, 2);
+    // 101-C（第二轮）修复：老代码固定帧只写 1 字节 link addr（5 字节帧），
+    // 但可变帧 (SendGIRsp / activation-conf 等) 里都写 2 字节 addr —— 位宽
+    // 不一致，规约要求两处一致。且 linkAddr > 255 时高字节丢失，主站认不
+    // 出。改为规约标准 6 字节固定帧: [0x10 CTRL ADDR_L ADDR_H CS 0x16]。
+    // CS 覆盖 CTRL + ADDR_L + ADDR_H（3 字节 user data）。
+    uint8_t frame[6];
+    frame[0] = IEC101_START_FIX;                                     // 0x10
+    frame[1] = 0x03;                                                 // CTRL: primary + fun=3 (ACK)
+    frame[2] = static_cast<uint8_t>(linkAddr & 0xFF);                // ADDR low
+    frame[3] = static_cast<uint8_t>((linkAddr >> 8) & 0xFF);         // ADDR high
+    frame[4] = CalcCS(frame + 1, 3);                                 // CS 覆盖 CTRL + ADDR_L + ADDR_H
+    frame[5] = IEC101_END;                                           // 0x16
     try { io.write(frame, sizeof(frame)); } catch (...) {}
 }
 

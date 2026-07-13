@@ -39,11 +39,9 @@ Dlt645Master::Dlt645Master() {}
 Dlt645Master::~Dlt645Master() { Stop(); }
 
 // ==================== Checksum ====================
-
+// 保留兼容签名，转调 inline CalcCS。
 uint8_t Dlt645Master::CheckSum(const uint8_t* data, size_t len) {
-    uint8_t cs = 0;
-    for (size_t i = 0; i < len; i++) cs = static_cast<uint8_t>(cs + data[i]);
-    return cs;
+    return CalcCS(data, len);
 }
 
 // ==================== 地址转换 ====================
@@ -80,22 +78,26 @@ bool Dlt645Master::BuildReadFrame(uint8_t* frame, size_t& frameLen,
                                     uint64_t addr, uint32_t dataId,
                                     DltVersion ver) {
     // Frame: 68 A0 A1 A2 A3 A4 A5 68 C L DI0 DI1 [DI2 DI3] CS 16
+    // DLT-1（第二轮）：DATA 字段（DI + 数据）每字节 +0x33 后发送。
+    // DLT-2（第二轮）：CS 从第一个起始符 0x68 起（含），到 CS 前一字节，
+    // 所有字节 mod 256 求和。老代码起点错在 frame+1（跳过了 0x68）。
     size_t pos = 0;
     frame[pos++] = FRAME_START;                     // Start
     // Address field (6 bytes, BCD reverse order, low byte first)
     // addr = 0x010001234567 -> send 67 45 23 01 00 01
-    frame[pos++] = static_cast<uint8_t>((addr >> 40) & 0xFF); // byte5
-    frame[pos++] = static_cast<uint8_t>((addr >> 32) & 0xFF); // byte4
-    frame[pos++] = static_cast<uint8_t>((addr >> 24) & 0xFF); // byte3
-    frame[pos++] = static_cast<uint8_t>((addr >> 16) & 0xFF); // byte2
-    frame[pos++] = static_cast<uint8_t>((addr >> 8) & 0xFF);  // byte1
     frame[pos++] = static_cast<uint8_t>(addr & 0xFF);         // byte0
+    frame[pos++] = static_cast<uint8_t>((addr >> 8) & 0xFF);  // byte1
+    frame[pos++] = static_cast<uint8_t>((addr >> 16) & 0xFF); // byte2
+    frame[pos++] = static_cast<uint8_t>((addr >> 24) & 0xFF); // byte3
+    frame[pos++] = static_cast<uint8_t>((addr >> 32) & 0xFF); // byte4
+    frame[pos++] = static_cast<uint8_t>((addr >> 40) & 0xFF); // byte5
 
     frame[pos++] = FRAME_START;                     // Start
     frame[pos++] = 0x11;                            // Control: read
     size_t lenPos = pos++;                          // Placeholder for L
+    size_t dataStart = pos;                         // DLT-1: DATA 字段起点
 
-    // Data ID DI
+    // Data ID DI —— 先按明文写入，后面统一 +0x33 加密。
     // 1997: 2 bytes (DI0, DI1) little-endian
     // 2007: 4 bytes (DI0, DI1, DI2, DI3) little-endian
     // dataId = 0xDDCCBBAA (2007) / 0xBBAA (1997)
@@ -110,8 +112,11 @@ bool Dlt645Master::BuildReadFrame(uint8_t* frame, size_t& frameLen,
     size_t dataLen = (ver == DltVersion::V2007) ? 4 : 2; // DI length
     frame[lenPos] = static_cast<uint8_t>(dataLen & 0xFF); // L = DI length
 
-    // Checksum (from address field to byte before CS)
-    frame[pos] = CheckSum(frame + 1, pos - 1); // start from address
+    // DLT-1: 对 DATA 段（此处只含 DI）+0x33
+    EncodeData(frame + dataStart, dataLen);
+
+    // DLT-2: 校验和范围从 frame[0]（起始符 0x68）起，到 CS 前一字节
+    frame[pos] = CalcCS(frame, pos);
     pos++;
 
     frame[pos++] = FRAME_END;
@@ -438,18 +443,54 @@ bool Dlt645Master::PollDevice(CommIO& io, const DltDeviceConfig& dev,
 
         if (resp[0] != FRAME_START || resp[pos-1] != FRAME_END) continue;
 
+        // DLT-3（第二轮）：校验 CS。CS 位于 resp[pos-2]，范围 = resp[0..pos-3]。
+        uint8_t expectCS = CalcCS(resp, pos - 2);
+        if (resp[pos-2] != expectCS) {
+            if (ch.verbose >= 1) std::cerr << "[DLT645] CS 错误: expect="
+                << std::hex << (int)expectCS << " got=" << (int)resp[pos-2]
+                << std::dec << std::endl;
+            continue;
+        }
+
+        // DLT-3: 校验响应地址回比 —— 多表挂同一 485 时避免窜表数据。
+        if (pos < 8 || !AddrEquals(resp + 1, dev.address)) {
+            if (ch.verbose >= 1) std::cerr << "[DLT645] 地址不匹配，可能是别的表应答" << std::endl;
+            continue;
+        }
+
+        // 帧头再次校验：resp[7] 应是第二个 0x68
+        if (resp[7] != FRAME_START) continue;
+
         // Control code should be 0x91 (read response)
-        uint8_t ctrl = resp[7];
+        uint8_t ctrl = resp[8];
         if (ctrl != 0x91) continue;
 
-        uint8_t dataLen = resp[8];
-        if (pos < static_cast<size_t>(9 + dataLen + 2)) continue;
+        uint8_t dataLen = resp[9];
+        if (pos < static_cast<size_t>(10 + dataLen + 2)) continue;
+
+        // DLT-1: DATA 段（DI + 值）接收后每字节 -0x33。用局部 buffer 保留 resp
+        // 不变，方便调试打印。
+        uint8_t dataBuf[MAX_FRAME];
+        std::memcpy(dataBuf, resp + 10, dataLen);
+        DecodeData(dataBuf, dataLen);
 
         // Skip DI bytes, data starts after DI field
-        // resp[7]=C, resp[8]=L, resp[9..]=DI+data
+        // resp[8]=C, resp[9]=L, resp[10..]=DI+data
         int diLen = (ver == DltVersion::V2007) ? 4 : 2;
-        const uint8_t* dataStart = resp + 9 + diLen;
-        size_t dataBytes = dataLen - diLen;
+        if (dataLen < diLen) continue;
+
+        // DLT-3: 校验响应的 DI 与请求一致（dataBuf 现在是已解码明文）
+        uint32_t respDI = 0;
+        for (int i = 0; i < diLen; i++)
+            respDI |= static_cast<uint32_t>(dataBuf[i]) << (8 * i);
+        if (respDI != ai.dataId) {
+            if (ch.verbose >= 1) std::cerr << "[DLT645] DI 不匹配: expect="
+                << std::hex << ai.dataId << " got=" << respDI << std::dec << std::endl;
+            continue;
+        }
+
+        const uint8_t* dataStart = dataBuf + diLen;
+        size_t dataBytes = static_cast<size_t>(dataLen) - static_cast<size_t>(diLen);
 
         if (dataBytes < ai.dataLen) continue;
 

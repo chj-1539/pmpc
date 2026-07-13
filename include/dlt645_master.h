@@ -87,6 +87,41 @@ public:
     void Stop();
     bool IsRunning() const { return running_; }
 
+    // ── DLT-2（第二轮）：CS 范围公开助手（供测试） ──────────────────────────
+    // 规约要求 CS = 从第一个 0x68（起始符）开始，到 CS 前一字节，所有字节
+    // 按字节累加 mod 256。老代码写作 `CheckSum(frame + 1, pos - 1)` —— 起点
+    // 少算 1 字节（漏掉了起始符 0x68）。inline static 便于测试零依赖调用。
+    static inline uint8_t CalcCS(const uint8_t* data, size_t len) {
+        uint8_t cs = 0;
+        for (size_t i = 0; i < len; i++) cs = static_cast<uint8_t>(cs + data[i]);
+        return cs;
+    }
+
+    // ── DLT-1（第二轮）：±0x33 数据加/解码 ─────────────────────────────────
+    // 规约 §5.1：帧结构 68 A0..A5 68 C L DATA CS 16 —— DATA 字段（DI + Value）
+    // 发送前每字节 +0x33，接收后每字节 -0x33。之前的实现完全未做该变换 →
+    // 任何真实电表都会拒绝或返回被误解的 BCD。
+    // 就地修改；DATA 长度 = L 字段。
+    static inline void EncodeData(uint8_t* data, size_t len) {
+        for (size_t i = 0; i < len; i++)
+            data[i] = static_cast<uint8_t>(data[i] + 0x33);
+    }
+    static inline void DecodeData(uint8_t* data, size_t len) {
+        for (size_t i = 0; i < len; i++)
+            data[i] = static_cast<uint8_t>(data[i] - 0x33);
+    }
+
+    // ── DLT-3（第二轮）：应答地址回比公开助手（供测试） ──────────────────────
+    // resp[1..6] 应该等于请求发出的 addr（低字节在前）。若不一致，多半是
+    // 同一 485 总线上的别的表迟延应答。
+    static inline bool AddrEquals(const uint8_t* respAddr6, uint64_t addr) {
+        for (size_t i = 0; i < 6; i++) {
+            uint8_t byte = static_cast<uint8_t>((addr >> (i * 8)) & 0xFF);
+            if (respAddr6[i] != byte) return false;
+        }
+        return true;
+    }
+
 private:
     // ── 配置解析 ──
     bool ParseGlobal(const std::string& key, const std::string& val);

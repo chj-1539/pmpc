@@ -254,7 +254,16 @@ SOE 帧单条记录格式（12 字节）：`CH(1) | DEV(1) | SOE_ID(2小端) | m
 
 回归 [tests/test_data_recorder_atomic.cxx](tests/test_data_recorder_atomic.cxx)（6 tests）验证 `std::atomic<void*>` 在 MinGW g++ 上 lock-free + `exchange` 语义 + `release/acquire` happens-before —— 不依赖 mysql.h，CI 可跑。
 
-**第二轮剩余**：Agent 报告的 High/Medium 约 24 处（Redundancy 冷启动双 Idle / hbMtx_ 内阻塞 connect、DebugConsole AutoTask race / detach UAF、PempServer 时钟 08H 空壳 / NaN UB、PacketLogger 日切句柄泄漏、DLT645 无 ±0x33 / IEC103 应答不解析 / IEC101 SendACK 单字节 addr 等协议规范偏离）留作下一轮。
+**第三批（P0 协议合规三簇 —— 与真实设备互通必修）**：
+
+- **DLT-1 DLT645 未做 DATA 段 ±0x33 加解码**：规约 §5.1 要求 DATA 字段（DI + Value）发送前每字节 +0x33、接收后 -0x33，除 header/CS/结束符。老代码完全未做 → 任何真实电表都会拒绝或返回被误解的 BCD。修复：`BuildReadFrame` 里 DI 字段构造后调 `EncodeData(frame + dataStart, dataLen)`；`PollDevice` 收帧后对 DATA 段调 `DecodeData` 再解析 BCD。
+- **DLT-2 DLT645 CS 求和范围少了起始符**：规约 CS = 从第一个起始符 0x68 起（含）到 CS 前一字节。老代码 `CheckSum(frame + 1, pos - 1)` 起点错在 `frame + 1`（跳过 0x68）。修复：CS 起点改为 `frame + 0`；抽 `CalcCS(data, len)` inline helper。同时修正了 6 字节地址字节序 —— 老代码高字节先送违反规约"低字节先送"。
+- **DLT-3 DLT645 PollDevice 无 CS / 地址 / DI 一致性校验**：多表挂同 485 时 A 表迟延应答会被误当 B 表数据入库。修复：应答入口验 `CalcCS(resp, pos-2) == resp[pos-2]` → 验 `AddrEquals(resp+1, dev.address)` → 验响应 DI = 请求 DI，任一失败 continue。回归 [tests/test_dlt645_frame_codec.cxx](tests/test_dlt645_frame_codec.cxx)（12 tests）。
+- **103-CS IEC103 CS 求和范围错**：规约 §7 要求 CS = user data 段（CTRL..ASDU）的累加和；老代码 `for i=0..sizeof(req)-2` 从起始符起累加，多算 `0x68+LEN+LEN+0x68 = 0xE2`。严格从站按规约验 CS 全部失败。修复：抽 `CalcUserDataCS(userData, len)` inline helper；PollDevice 调 `CalcUserDataCS(req + 4, 9)`。
+- **103-1 IEC103 请求帧一行"逗号+字节"被 `//` 注释吞（同 pattern CDT C2）**：`0x06,  // COT: activation            0x00,` —— 尾巴上的 `0x00` 位于注释里被吞。仔细审计发现字节数依然对（15 元素、LEN=9 与实际 user data 字节数吻合），但代码可读性/防御力都为零。修复：请求帧重写为每字节独立列出、显式标注帧偏移；测试断言字节布局。**103-2 应答按规约结构化解析**（当前"取最后一个非终止字节当值"）留 TODO —— 完整重写需几百行 ASDU 类型分派，超出本簇范围。回归 [tests/test_iec103_master_frame.cxx](tests/test_iec103_master_frame.cxx)（9 tests）。
+- **101-C iec101_slave SendACK 只写 1 字节地址（5 字节固定帧）**：规约 IEC 60870-5-101 §5 固定帧 = `10 CTRL ADDR_L ADDR_H CS 16` 共 6 字节。老代码只 5 字节，`linkAddr > 255` 时高字节丢失；且与可变帧的 2 字节 addr 位宽不一致，主站认不出。修复：SendACK 改为 6 字节；CS 覆盖 CTRL+ADDR_L+ADDR_H；LoadConfig 加 linkAddr 范围警告；抽 `BuildFixedAck(linkAddr, out[6])` + `CalcCS` inline helper（后者 public，同时替代原 private 版本）。回归 [tests/test_iec101_slave_send_ack.cxx](tests/test_iec101_slave_send_ack.cxx)（11 tests）。
+
+**第二轮剩余**：Agent 报告的 High/Medium 约 21 处（Redundancy 冷启动双 Idle / hbMtx_ 内阻塞 connect、DebugConsole AutoTask race / detach UAF、PempServer 时钟 08H 空壳 / NaN UB、PacketLogger 日切句柄泄漏、iec104_slave 热重载 binds_ 累加 / C_SC 长度守卫 / CP56Time2a 时区、Modbus TCP/RTU slave clientThreads_ 无 cleanup、CDT slave YM 缺字节 …）留作下一轮。
 
 ### 🩹 本轮代码审查修复（回归测试见 tests/）
 

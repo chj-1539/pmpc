@@ -301,6 +301,18 @@ add_pmpc_test(test_iec101_slave_frame_layout test_iec101_slave_frame_layout.cxx)
 # 不 include mysql.h 保证 CI 环境可跑
 add_pmpc_test(test_data_recorder_atomic test_data_recorder_atomic.cxx)
 
+# DLT-1/2/3 (第二轮): DLT 645 帧编解码合规
+# CalcCS / EncodeData / DecodeData / AddrEquals 已 inline，测试零依赖
+add_pmpc_test(test_dlt645_frame_codec test_dlt645_frame_codec.cxx)
+
+# 103-1 + 103-CS (第二轮): IEC 60870-5-103 请求帧构造合规
+# CalcUserDataCS 已 inline，测试零依赖
+add_pmpc_test(test_iec103_master_frame test_iec103_master_frame.cxx)
+
+# 101-C (第二轮): iec101_slave SendACK 生成的固定帧规约合规
+# BuildFixedAck + CalcCS 已 inline，测试零依赖
+add_pmpc_test(test_iec101_slave_send_ack test_iec101_slave_send_ack.cxx)
+
 # C1: iec104_slave 客户端注册（ClientThread 应把自己 push 进 clients_）
 add_pmpc_test(test_iec104_slave_client_registration test_iec104_slave_client_registration.cxx
     ${CMAKE_SOURCE_DIR}/src/iec104_slave.cxx

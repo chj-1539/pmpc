@@ -211,25 +211,35 @@ bool Iec103Master::PollDevice(CommIO& io, const Iec103DeviceConfig& dev, const I
     for (auto& ai : dev.aiList) {
         if (!running_) return false;
 
-        // Build query command: simplified FUN+INF request
-        uint8_t req[] = {
-            FRAME_START_103, 0x09, 0x09, FRAME_START_103, // 68 09 09 68
-            0x7B,  // CTRL: request
-            (uint8_t)(dev.station & 0xFF), // Address
-            0x64,  // ASDU type: C_IC_NA_1
-            0x01,  // VSQ
-            0x06,  // COT: activation            0x00,
-            (uint8_t)(dev.station & 0xFF), // Common address
-            (uint8_t)((dev.station >> 8) & 0xFF),
-            ai.fun, // FUN
-            ai.inf, // INF
-            0x00,  // CS
-            0x16   // End
-        };
-        // Fix CS
-        uint8_t cs = 0;
-        for (size_t i = 0; i < sizeof(req) - 2; i++) cs = (uint8_t)(cs + req[i]);
-        req[sizeof(req) - 2] = cs;
+        // 103-1（第二轮）修复：请求帧按字节独立列出，避免行尾 `//` 注释
+        // 意外吞掉某个字节（同 pattern 于 CDT C2、IEC101 SendACK）。所有
+        // 字段位置显式标注。
+        //
+        // IEC 60870-5-103 简化请求帧（可变帧）:
+        //   [0]=0x68 [1]=LEN [2]=LEN [3]=0x68  ← header
+        //   [4]=CTRL [5]=ADDR                  ← user data 起点
+        //   [6]=TYPE [7]=VSQ [8]=COT [9..10]=COA(2B) [11]=FUN [12]=INF
+        //   [13]=CS  [14]=0x16                 ← trailer
+        // LEN = user data 长度 = 13 - 4 = 9
+        //
+        // 103-CS 修复：CS 求和范围从 CTRL（buf[4]）起到 CS 前一字节（buf[12]），
+        // 即 buf + 4，长度 9。
+        uint8_t req[15];
+        req[0]  = FRAME_START_103;
+        req[1]  = 0x09;                                                     // LEN
+        req[2]  = 0x09;                                                     // LEN (重复)
+        req[3]  = FRAME_START_103;
+        req[4]  = 0x7B;                                                     // CTRL: request
+        req[5]  = static_cast<uint8_t>(dev.station & 0xFF);                 // link ADDR
+        req[6]  = 0x64;                                                     // TYPE: C_IC_NA_1
+        req[7]  = 0x01;                                                     // VSQ
+        req[8]  = 0x06;                                                     // COT: activation
+        req[9]  = static_cast<uint8_t>(dev.station & 0xFF);                 // Common ADDR low
+        req[10] = static_cast<uint8_t>((dev.station >> 8) & 0xFF);          // Common ADDR high
+        req[11] = ai.fun;                                                   // FUN
+        req[12] = ai.inf;                                                   // INF
+        req[13] = CalcUserDataCS(req + 4, 9);                               // CS (user data)
+        req[14] = 0x16;                                                     // END
 
         uint8_t resp[MAX_FRAME];
         size_t respLen = 0;
@@ -239,6 +249,10 @@ bool Iec103Master::PollDevice(CommIO& io, const Iec103DeviceConfig& dev, const I
         if (respLen < 6) continue;
 
         // 从响应中提取值（简化：假设响应包含原始值）
+        // TODO(103-2): 完整实现 IEC 60870-5-103 §5.1 应答解析（TYPE + VSQ + COT
+        // + FUN + INF + DPI/measured value）。当前实现只是取"最后一个非终止
+        // 字节"作 raw val，对任意真实从站都得到错值。要与实际 IEC 103 从站
+        // 通信必须先修此处。
         double rawVal = 0.0;
         for (size_t i = 4; i < respLen; i++) {
             if (resp[i] == 0x16) break;
