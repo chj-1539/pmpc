@@ -239,6 +239,7 @@ SOE 帧单条记录格式（12 字节）：`CH(1) | DEV(1) | SOE_ID(2小端) | m
 ### 🩹 本轮代码审查修复（回归测试见 tests/）
 
 - **`iec104_slave` clients_ 从未注册**（C1）：SendDIActiveUpload / SendAIActiveUpload / TimerThread 都遍历 `clients_`，但 ClientThread 从未 push 任何 ClientInfo → 主动上送全部空转。修复：`clients_` 改为 `vector<shared_ptr<ClientInfo>>`；ClientThread 构造自己的 ClientInfo、进入时 push、退出时 erase；RecvFrame 增加 `peerClosedOut` 参数供 ClientThread 区分超时与断连。加 public `ClientCount()` 供测试观察。
+- **`RedundancyManager::SetRole` 无锁**（C5）：CheckFailover（心跳线程）与 RequestRoleChange（debug_console 线程）都能进入，两条路径可能并发启动 syncChannel_。修复：新增 `roleMtx_` 保护整段（状态检查 + syncChannel_.Stop → Start），保证并发调用互相 serialize；同时新语义"每次切换前 Stop 现有 syncChannel_"消除了 Standby→Master 时旧 recv 线程未终止的隐患。
 
 - **`cdt_master.cxx` 同步头判断被注释吞掉**（C2）：`if (pos==0 && byte != SYNC_BYTE)` 写进了 `//` 单行注释里，pos=0 时任意字节都会写入 buf[0]。已抽出 `CdtMaster::AdvanceSyncHeader` 纯函数并让 `PortThread` 复用。
 - **`event_bus.h` 缺 `<algorithm>`**（C6）：`Unsubscribe` 用 `std::remove_if` 却未包含该头文件，只通过传递包含才能编译。已直接 include。
