@@ -154,7 +154,19 @@ private:
     std::map<DataPointKey, AOPointConfig> aoPoints_;
 
     // MySQL
-    MYSQL* mysql_ = nullptr;
+    // DR-1（第二轮）：mysql_ 改为 atomic 指针 —— 快速路径 On*Change 里的
+    // `if (!mysql_) return` 与 TimerThread 里的 swap 并发发生时，普通指针
+    // 读写在 C++ memory model 下是数据竞争 UB。用 atomic 让 load(acquire)
+    // 与 store(release) 建立 happens-before。SQL 调用点需先 load 到局部
+    // 变量再传给 mysql_query。
+    //
+    // 用法：
+    //   快速路径判活：if (!MysqlIsUp()) return;         // 无 memory barrier 之下的粗筛
+    //   要用 handle：  MYSQL* h = mysql_.load(order);   // 传给 mysql_query 等
+    std::atomic<MYSQL*> mysql_{nullptr};
+    inline bool MysqlIsUp() const {
+        return mysql_.load(std::memory_order_acquire) != nullptr;
+    }
     std::atomic<bool> connected_{false};
     mutable std::mutex mysqlMtx_;
 

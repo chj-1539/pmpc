@@ -247,7 +247,14 @@ SOE 帧单条记录格式（12 字节）：`CH(1) | DEV(1) | SOE_ID(2小端) | m
 - **CR-5 iec101_slave HandleFrame 不分帧类型统一读 buf[1] 当 CTRL**：可变帧 `[0x68 LEN LEN 0x68 CTRL ADDR...]` 的 buf[1] 是 LEN！LEN 低 4 位 =0 → 误发 Reset ACK；=A/B → 误发 Class1 数据。与任何合规主站互通就崩。修复：先按 `buf[0]` 分帧类型（固定帧 CTRL 在 buf[1]，可变帧在 buf[4]），只有固定帧才走 fun 分支。抽 `CtrlOffsetForStart(startByte)` inline helper 供测试。
 - **CR-6 iec101_slave 可变帧 LEN 字段 = 4 + asduLen（规约要求 3 + asduLen）**：`LEN = CTRL(1) + ADDR(2) + N_asdu`；老代码所有从站 TX 帧（SendGIRsp、SendACK 附带的 activation-conf、Class1 应答、remote control confirm）多写 1 字节 → 严格主站按 LEN 拉数据把 CS 当 ASDU 末字节 → CS 校验失败丢帧。修复：5 处 `4 + …` 改 `3 + …`；抽 `VariableFrameLen(asduLen)` inline helper。回归 [tests/test_iec101_slave_frame_layout.cxx](tests/test_iec101_slave_frame_layout.cxx)（10 tests，同时覆盖 CR-5 / CR-6）。
 
-**第二轮剩余**：Agent 报告的 High/Medium 约 26 处（Redundancy 冷启动双 Idle / hbMtx_ 内阻塞 connect、DebugConsole AutoTask race / detach UAF、PempServer 时钟 08H 空壳 / NaN UB、PacketLogger 日切句柄泄漏、DLT645 无 ±0x33 / IEC103 应答不解析 / IEC101 SendACK 单字节 addr 等协议规范偏离）留作下一轮。
+**第二批（DataRecorder 收尾）**：
+
+- **DR-1 DataRecorder mysql_ 非 atomic → 快速路径与 swap 的数据竞争**：`On*Change` 快速路径 `if (!mysql_) return` 与 TimerThread 重连 swap 并发时，普通指针读写是 UB（撕裂读、看到 stale 值）。修复：`mysql_` 改 `std::atomic<MYSQL*>`；新增 `MysqlIsUp()` inline helper 用 `load(acquire)` 做快速判活；TimerThread 重连 swap 改为 `mysql_.exchange(newConn, acq_rel)` 一步完成（原来是"取锁 → 读旧 → 写新 → 释锁"多步）；ConnectMySQL / DisconnectMySQL / ExecSQL / Escape / DropOldTables / CheckSchemaVersion 所有 SQL 调用点 load 到局部 `MYSQL* h` 再传给 libmysqlclient。
+- **DR-2 DropOldTables + PacketLogger::CleanupOldLogs 在 mysqlMtx_ 内做长扫描**：H10（第一轮）没挪到锁外的坑 —— 每 2 分钟一次，SHOW TABLES + DROP TABLE 每张几十 ms，锁内累积几百 ms 阻塞所有订阅者。修复：两者从 mysqlMtx_ 临界区挑出，锁外独立调用。DropOldTables 入口 `MYSQL* h = mysql_.load(acquire)` 后沿用（外部若在扫描期间 close 连接，SQL 会返回错误但不 crash — libmysqlclient 对失效 handle 有容错）。
+
+回归 [tests/test_data_recorder_atomic.cxx](tests/test_data_recorder_atomic.cxx)（6 tests）验证 `std::atomic<void*>` 在 MinGW g++ 上 lock-free + `exchange` 语义 + `release/acquire` happens-before —— 不依赖 mysql.h，CI 可跑。
+
+**第二轮剩余**：Agent 报告的 High/Medium 约 24 处（Redundancy 冷启动双 Idle / hbMtx_ 内阻塞 connect、DebugConsole AutoTask race / detach UAF、PempServer 时钟 08H 空壳 / NaN UB、PacketLogger 日切句柄泄漏、DLT645 无 ±0x33 / IEC103 应答不解析 / IEC101 SendACK 单字节 addr 等协议规范偏离）留作下一轮。
 
 ### 🩹 本轮代码审查修复（回归测试见 tests/）
 

@@ -296,6 +296,11 @@ add_pmpc_test(test_iec104_master_sframe_ctrl test_iec104_master_sframe_ctrl.cxx)
 # VariableFrameLen / CtrlOffsetForStart 已 inline，测试零依赖
 add_pmpc_test(test_iec101_slave_frame_layout test_iec101_slave_frame_layout.cxx)
 
+# DR-1 (第二轮): DataRecorder::mysql_ atomic 语义支撑
+# 用 std::atomic<void*> 验证 exchange / release-acquire happens-before，
+# 不 include mysql.h 保证 CI 环境可跑
+add_pmpc_test(test_data_recorder_atomic test_data_recorder_atomic.cxx)
+
 # C1: iec104_slave 客户端注册（ClientThread 应把自己 push 进 clients_）
 add_pmpc_test(test_iec104_slave_client_registration test_iec104_slave_client_registration.cxx
     ${CMAKE_SOURCE_DIR}/src/iec104_slave.cxx

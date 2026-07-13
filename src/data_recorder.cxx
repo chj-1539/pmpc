@@ -73,32 +73,40 @@ DataRecorder::~DataRecorder()
 }
 
 // ==================== MySQL 连接管理 ====================
+//
+// DR-1（第二轮）：mysql_ 是 std::atomic<MYSQL*>。
+//   * ConnectMySQL / DisconnectMySQL：单线程冷启动 / 单线程 Stop 用（module 层
+//     串行化保证），此处直接 store(release) 语义即可。
+//   * 快速路径 On*Change 快速判活：load(acquire)，配 mysqlMtx_ 保护后续 query。
+//   * TimerThread 重连：局部建立 newConn 后 exchange() atomically swap。
+//   * 所有 mysql_query / mysql_ping / mysql_error 调用点需 load 到局部变量
+//     `h` 再传给 libmysqlclient（该库函数期待普通指针）。
 
 bool DataRecorder::ConnectMySQL()
 {
-    if (mysql_) return true;
+    if (mysql_.load(std::memory_order_acquire)) return true;
 
-    mysql_ = mysql_init(nullptr);
-    if (!mysql_) {
+    MYSQL* h = mysql_init(nullptr);
+    if (!h) {
         std::cerr << "[DataRecorder] mysql_init 失败" << std::endl;
         return false;
     }
 
-    if (!mysql_real_connect(mysql_, host_.c_str(), user_.c_str(),
+    if (!mysql_real_connect(h, host_.c_str(), user_.c_str(),
                             password_.c_str(), dbName_.c_str(),
                             static_cast<unsigned int>(port_),
                             nullptr, 0))
     {
-        std::cerr << "[DataRecorder] MySQL 连接失败: " << mysql_error(mysql_)
+        std::cerr << "[DataRecorder] MySQL 连接失败: " << mysql_error(h)
                   << " (" << host_ << ":" << port_ << ")" << std::endl;
-        mysql_close(mysql_);
-        mysql_ = nullptr;
+        mysql_close(h);
         return false;
     }
 
     // 设置 UTF8MB4
-    mysql_set_character_set(mysql_, "utf8mb4");
+    mysql_set_character_set(h, "utf8mb4");
 
+    mysql_.store(h, std::memory_order_release);
     connected_ = true;
     std::cout << "[DataRecorder] MySQL 已连接: " << host_ << ":" << port_
               << " db=" << dbName_ << " source=" << source_ << std::endl;
@@ -107,19 +115,18 @@ bool DataRecorder::ConnectMySQL()
 
 void DataRecorder::DisconnectMySQL()
 {
-    if (mysql_) {
-        mysql_close(mysql_);
-        mysql_ = nullptr;
-    }
+    MYSQL* h = mysql_.exchange(nullptr, std::memory_order_acq_rel);
+    if (h) mysql_close(h);
     connected_ = false;
 }
 
 bool DataRecorder::ExecSQL(const std::string& sql)
 {
     std::lock_guard<std::mutex> lock(mysqlMtx_);
-    if (!mysql_) return false;
-    if (mysql_query(mysql_, sql.c_str()) != 0) {
-        std::cerr << "[DataRecorder] SQL 错误: " << mysql_error(mysql_)
+    MYSQL* h = mysql_.load(std::memory_order_acquire);
+    if (!h) return false;
+    if (mysql_query(h, sql.c_str()) != 0) {
+        std::cerr << "[DataRecorder] SQL 错误: " << mysql_error(h)
                   << "\n  SQL: " << sql.substr(0, 200) << std::endl;
         return false;
     }
@@ -128,9 +135,10 @@ bool DataRecorder::ExecSQL(const std::string& sql)
 
 bool DataRecorder::ExecSQLPrintLocked(const std::string& sql, const char* errTag)
 {
-    if (!mysql_) return false;
-    if (mysql_query(mysql_, sql.c_str()) != 0) {
-        std::cerr << "[DataRecorder] " << errTag << ": " << mysql_error(mysql_) << std::endl;
+    MYSQL* h = mysql_.load(std::memory_order_relaxed);   // 调用者已持 mysqlMtx_
+    if (!h) return false;
+    if (mysql_query(h, sql.c_str()) != 0) {
+        std::cerr << "[DataRecorder] " << errTag << ": " << mysql_error(h) << std::endl;
         return false;
     }
     return true;
@@ -142,9 +150,10 @@ bool DataRecorder::ExecSQLPrintLocked(const std::string& sql, const char* errTag
 
 std::string DataRecorder::Escape(const std::string& s) const
 {
-    if (!mysql_) return s;
+    MYSQL* h = mysql_.load(std::memory_order_acquire);
+    if (!h) return s;
     std::vector<char> buf(s.size() * 2 + 1, 0);
-    mysql_real_escape_string(mysql_, buf.data(), s.c_str(), (unsigned long)s.size());
+    mysql_real_escape_string(h, buf.data(), s.c_str(), (unsigned long)s.size());
     return buf.data();
 }
 
@@ -229,9 +238,10 @@ bool DataRecorder::CheckSchemaVersion()
     }
 
     // 查询当前版本
+    MYSQL* h = mysql_.load(std::memory_order_relaxed);   // 调用者已持 mysqlMtx_
     MYSQL_RES* res = nullptr;
-    if (!mysql_query(mysql_, "SELECT MAX(version) FROM schema_version")) {
-        res = mysql_store_result(mysql_);
+    if (h && !mysql_query(h, "SELECT MAX(version) FROM schema_version")) {
+        res = mysql_store_result(h);
     }
 
     int dbVersion = 0;
@@ -404,7 +414,7 @@ void DataRecorder::WriteRT(const std::string& type, const std::string& tag,
     // 【重要】调用者（On*Change / TimerThread）必须已持 mysqlMtx_。
     // 内部一律走 *Locked 版本；用 ExecSQLPrint / CreateDILog 会导致同一线程
     // 二次上锁非递归 mutex → UB / 死锁（第一轮 H10 修复留下的坑，第二轮 CR-1）。
-    if (!mysql_ || !enabled_) return;
+    if (!MysqlIsUp() || !enabled_) return;
     std::string src = Escape(source_);
     std::string t = Escape(tag);
 
@@ -420,7 +430,7 @@ void DataRecorder::WriteDI(const DIChange& ev, const std::string& tag,
                             const std::string& oldVal)
 {
     // 【重要】调用者（OnDIChange）必须已持 mysqlMtx_。见 WriteRT 注释。
-    if (!mysql_ || !enabled_) return;
+    if (!MysqlIsUp() || !enabled_) return;
 
     std::string table = CurrentMonthTable("di_log");
     // 确保月度表存在（Locked 版本，不重入锁）
@@ -442,7 +452,7 @@ void DataRecorder::WriteDI(const DIChange& ev, const std::string& tag,
 void DataRecorder::WriteAI()
 {
     // 注意：调用者（TimerThread）已持有 mysqlMtx_ 锁
-    if (!mysql_ || !enabled_) return;
+    if (!MysqlIsUp() || !enabled_) return;
     if (aiPoints_.empty()) return;
 
     auto& mgr = RemoteDataMgr::Instance();
@@ -482,7 +492,7 @@ void DataRecorder::WriteAI()
 
 void DataRecorder::OnDIChange(const DIChange& ev)
 {
-    if (!enabled_ || !mysql_) return;
+    if (!enabled_ || !MysqlIsUp()) return;
 
     // 在持 mysqlMtx_ 前先读旧值，避免锁顺序依赖
     std::string oldVal = "0";
@@ -501,7 +511,7 @@ void DataRecorder::OnDIChange(const DIChange& ev)
 
 void DataRecorder::OnAIChange(const AIChange& ev)
 {
-    if (!enabled_ || !mysql_) return;
+    if (!enabled_ || !MysqlIsUp()) return;
     std::lock_guard<std::mutex> lock(mysqlMtx_);
     auto it = aiPoints_.find({ev.channel, ev.device, ev.point});
     if (it == aiPoints_.end()) return;
@@ -513,7 +523,7 @@ void DataRecorder::OnAIChange(const AIChange& ev)
 
 void DataRecorder::OnDOChange(const DOChange& ev)
 {
-    if (!enabled_ || !mysql_) return;
+    if (!enabled_ || !MysqlIsUp()) return;
     std::lock_guard<std::mutex> lock(mysqlMtx_);
     auto it = doPoints_.find({ev.channel, ev.device, ev.point});
     if (it == doPoints_.end()) return;
@@ -523,7 +533,7 @@ void DataRecorder::OnDOChange(const DOChange& ev)
 
 void DataRecorder::OnAOChange(const AOChange& ev)
 {
-    if (!enabled_ || !mysql_) return;
+    if (!enabled_ || !MysqlIsUp()) return;
     std::lock_guard<std::mutex> lock(mysqlMtx_);
     auto it = aoPoints_.find({ev.channel, ev.device, ev.point});
     if (it == aoPoints_.end()) return;
@@ -533,16 +543,26 @@ void DataRecorder::OnAOChange(const AOChange& ev)
 }
 
 // ==================== 删除过期月度表 ====================
+//
+// DR-2（第二轮）：调用方 TimerThread 之前把 DropOldTables 和 PacketLogger::
+// CleanupOldLogs 都锁在 mysqlMtx_ 内，SHOW TABLES 和 DROP TABLE IF EXISTS
+// 可能扫过几十张表，中间的每个 mysql_query 会持续阻塞订阅者。DR-2 修复：
+// 调用方释放 mysqlMtx_ 后再调这两个 —— 但为了不让 DropOldTables 在锁外
+// 直接读 mysql_（可能被 DisconnectMySQL 换成 nullptr），本函数入口 load
+// 一次并在整个扫描过程沿用；连接被外部 close 后 SQL 会失败但不会 crash
+// （libmysqlclient 对失效 handle 的 mysql_query 返回错误而非 UB）。
 
 void DataRecorder::DropOldTables()
 {
-    if (retentionMonths_ <= 0 || !mysql_) return;
+    if (retentionMonths_ <= 0) return;
+    MYSQL* h = mysql_.load(std::memory_order_acquire);
+    if (!h) return;
     // 列出所有 di_log_ 和 ai_log_ 开头且日期早于 retention 的表
     auto dropPrefix = [&](const char* prefix) {
         MYSQL_RES* res = nullptr;
         std::string sql = std::string("SHOW TABLES LIKE '") + prefix + "_%'";
-        if (mysql_query(mysql_, sql.c_str())) return;
-        res = mysql_store_result(mysql_);
+        if (mysql_query(h, sql.c_str())) return;
+        res = mysql_store_result(h);
         if (!res) return;
         MYSQL_ROW row;
         while ((row = mysql_fetch_row(res))) {
@@ -569,7 +589,7 @@ void DataRecorder::DropOldTables()
             int cutoff = y * 100 + m;
             if (tblMonth < cutoff) {
                 std::string drop = "DROP TABLE IF EXISTS " + tblName;
-                mysql_query(mysql_, drop.c_str());
+                mysql_query(h, drop.c_str());
                 std::cout << "[DataRecorder] 删除过期表: " << tblName << std::endl;
             }
         }
@@ -598,7 +618,7 @@ void DataRecorder::TimerThread()
         std::this_thread::sleep_for(std::chrono::milliseconds(effectiveIntervalMs));
 
         if (!running_) break;
-        if (!enabled_ || !mysql_) continue;
+        if (!enabled_ || !MysqlIsUp()) continue;
 
         // H10 修复：先在锁**外**做慢的 mysql_ping / 断连重连，仅当拿到
         // 新连接（或确认现有连接可用）后再拿 mysqlMtx_ 做 swap + 快速
@@ -608,12 +628,14 @@ void DataRecorder::TimerThread()
         bool needReconnect = false;
         {
             std::lock_guard<std::mutex> lock(mysqlMtx_);
-            if (mysql_ && mysql_ping(mysql_) != 0) {
+            MYSQL* h = mysql_.load(std::memory_order_relaxed);
+            if (h && mysql_ping(h) != 0) {
                 std::cerr << "[DataRecorder] MySQL 连接断开，尝试重连..." << std::endl;
                 needReconnect = true;
             }
         }
-        // 重连在无锁下进行 —— 建立一个独立的 MYSQL* 连接，成功后再进锁 swap。
+        // 重连在无锁下进行 —— 建立一个独立的 MYSQL* 连接，成功后 atomically
+        // swap 进 mysql_（DR-1: atomic exchange + release）。
         if (needReconnect) {
             MYSQL* newConn = mysql_init(nullptr);
             if (newConn && mysql_real_connect(newConn, host_.c_str(), user_.c_str(),
@@ -621,14 +643,9 @@ void DataRecorder::TimerThread()
                                               static_cast<unsigned int>(port_),
                                               nullptr, 0))
             {
-                // 拿到新连接，快速切换（关旧的在锁外完成）
-                MYSQL* oldConn = nullptr;
-                {
-                    std::lock_guard<std::mutex> lock(mysqlMtx_);
-                    oldConn = mysql_;
-                    mysql_ = newConn;
-                    connected_ = true;
-                }
+                // DR-1: atomic exchange 一步完成 swap
+                MYSQL* oldConn = mysql_.exchange(newConn, std::memory_order_acq_rel);
+                connected_ = true;
                 if (oldConn) mysql_close(oldConn);
                 {
                     std::lock_guard<std::mutex> lock(mysqlMtx_);
@@ -643,6 +660,11 @@ void DataRecorder::TimerThread()
             }
         }
 
+        // DR-2 修复：锁内只做 rt 状态更新 + AI 批量存盘；DropOldTables /
+        // CleanupOldLogs 是耗时数百 ms 的扫描 + 删表操作，之前锁在
+        // mysqlMtx_ 内会让所有订阅者 On*Change 阻塞。挪到锁外调用 ——
+        // 两者内部只需要 atomic load mysql_ + SQL 是 OK 的（连接被外部
+        // close 也只是 SQL 失败，不 crash）。
         {
             std::lock_guard<std::mutex> lock(mysqlMtx_);
 
@@ -657,12 +679,12 @@ void DataRecorder::TimerThread()
 
             // AI 批量存盘
             WriteAI();
+        }
 
-            // 每隔约2分钟检查一次过期表（cleanupPeriodTicks 已在线程入口 clamp ≥1）
-            if (++tickCount % cleanupPeriodTicks == 0) {
-                PacketLogger::Instance().CleanupOldLogs();
-                DropOldTables();
-            }
+        // DR-2: 长扫描操作在锁外
+        if (++tickCount % cleanupPeriodTicks == 0) {
+            PacketLogger::Instance().CleanupOldLogs();
+            DropOldTables();
         }
     }
 

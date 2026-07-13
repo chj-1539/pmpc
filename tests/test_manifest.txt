@@ -53,6 +53,7 @@ test_data_mgr_ts_defense        | test_data_mgr_ts_defense.cxx        | src/pmpc
 test_data_recorder_helpers      | test_data_recorder_helpers.cxx      |
 test_iec104_master_sframe_ctrl  | test_iec104_master_sframe_ctrl.cxx  |
 test_iec101_slave_frame_layout  | test_iec101_slave_frame_layout.cxx  |
+test_data_recorder_atomic       | test_data_recorder_atomic.cxx       |
 #
 # === Phase 3: 协议主站测试 (待添加) ===
 #
