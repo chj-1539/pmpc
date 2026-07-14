@@ -6,6 +6,7 @@
 //=============================================================================
 
 #include "modbus_rtu_slave.h"
+#include "modbus_tcp_slave.h"  // H14 修复: 复用 DoubleToRawValue / RawToWireBytes
 #include "module_factory.h"
 #include "ini_reader.h"
 #include "str_util.h"
@@ -331,16 +332,20 @@ bool ModbusRtuSlave::HandleFCReadRegs(const uint8_t* pdu, size_t, std::vector<ui
         const auto& ai = it->second;
         int regCnt = DataConvert::GetRegCount(ai.dtype);
         AiPoint pt; if (!mgr.GetAi(ai.ch, ai.dev, ai.point, pt)) continue;
-        double rawVal = pt.value;
-        double unused;
-        // Store as uint16 big-endian (simplified: UInt16 only)
-        (void)unused;
-        uint16_t regVal = (uint16_t)rawVal;
+        // H14（第二轮）修复：老代码 `uint16_t regVal = (uint16_t)rawVal` 只
+        // 取 uint16 低 16 位，且对所有寄存器复制同一值；对于 Int32/Float
+        // 等多寄存器类型，返回全错的值。复用 modbus_tcp_slave 的转换函数。
+        uint64_t rawU64 = ModbusTcpSlave::DoubleToRawValue(pt.value, ai.dtype);
+        int byteCnt = DataConvert::GetRegCount(ai.dtype) * 2;
+        if (byteCnt > 8) byteCnt = 8;
+        // RawToWireBytes 按 endian 填 buf
+        uint8_t wireBuf[8] = {0};
+        ModbusTcpSlave::RawToWireBytes(rawU64, byteCnt, ai.endian, wireBuf);
         for (int r = 0; r < regCnt; r++) {
             int off = (int)(it->first - startAddr + r) * 2;
             if (off + 1 >= (int)byteCount) break;
-            data[off] = (uint8_t)((regVal >> 8) & 0xFF);
-            data[off + 1] = (uint8_t)(regVal & 0xFF);
+            data[off]     = wireBuf[r * 2];
+            data[off + 1] = wireBuf[r * 2 + 1];
         }
     }
 

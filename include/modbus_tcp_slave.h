@@ -149,6 +149,7 @@ private:
                        uint8_t func, uint8_t errCode);
 
     // ── 数据转换工具 ──
+public:   // H14（第二轮）: modbus_rtu_slave 也复用这些纯函数，需 public
     static uint64_t DoubleToRawValue(double value, MDataType dtype);
     static void RawToWireBytes(uint64_t rawVal, int byteCount, MEndian endian,
                                 uint8_t* out);

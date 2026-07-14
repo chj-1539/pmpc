@@ -89,6 +89,10 @@ private:
     Iec101MasterConfig config_;
     std::atomic<bool> running_{false};
     std::vector<std::thread> threads_;
+    // M18（第二轮）修复：FCB（帧计数位）应每次发送后翻转，平衡传输规约要求。
+    // 当前只有单通道/单串口场景，此处用普通成员即可（多通道串行访问时最差
+    // 情况是丢一次翻转，不会数据损坏）。
+    uint8_t fcbToggle_ = 0;
 };
 
 class Iec101MasterModule : public AppModule {

@@ -125,7 +125,9 @@ bool Iec101Master::SendRecvVarFrame(CommIO& io, const uint8_t* asdu, size_t asdu
     uint8_t len = (uint8_t)(4 + asduLen);
     frame[pos++] = len; frame[pos++] = len;
     frame[pos++] = IEC101_START_VAR;
-    frame[pos++] = 0x73;  // CTRL: DIR=1,PRM=1,FCB=1,FCV=1,SEND+REQ
+    // M18（第二轮）修复：FCB（bit5）应每次发送后翻转，平衡传输规约防止
+    // 从站将重复帧按新数据接受。0x73 = FCB=1, 0x53 = FCB=0。
+    frame[pos++] = fcbToggle_ ? 0x53 : 0x73;
     frame[pos++] = (uint8_t)(linkAddr & 0xFF);
     frame[pos++] = (uint8_t)((linkAddr >> 8) & 0xFF);
     std::memcpy(frame + pos, asdu, asduLen); pos += asduLen;
@@ -133,6 +135,8 @@ bool Iec101Master::SendRecvVarFrame(CommIO& io, const uint8_t* asdu, size_t asdu
     frame[pos++] = IEC101_END;
 
     try { io.write(frame, pos); } catch (...) { return false; }
+    // M18: 发送后翻转 FCB，下一帧用相反的值
+    fcbToggle_ ^= 1;
 
     uint8_t buf[MAX_FRAME]; size_t bp = 0;
     auto start = std::chrono::steady_clock::now();
