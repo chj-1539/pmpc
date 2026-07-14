@@ -275,6 +275,16 @@ void DebugConsole::ClientThread(socket clientSock,
 
     // ── 密码认证 ──
     if (!password_.empty()) {
+        // M1（第二轮）: constant-time 比较防止 timing attack + 失败延时减慢
+        // 暴力破解。
+        auto constantTimeEquals = [](const std::string& a, const std::string& b) -> bool {
+            if (a.size() != b.size()) return false;
+            volatile uint8_t diff = 0;   // volatile 防编译器优化
+            for (size_t i = 0; i < a.size(); i++)
+                diff = static_cast<uint8_t>(diff | (static_cast<uint8_t>(a[i]) ^ static_cast<uint8_t>(b[i])));
+            return diff == 0;
+        };
+
         SendLine(clientSock, "密码: ");
         std::string pwBuf;
         uint8_t tmp[256];
@@ -295,10 +305,12 @@ void DebugConsole::ClientThread(socket clientSock,
                 pwBuf.erase(0, pos + 1);
                 if (!line.empty() && line.back() == '\r') line.pop_back();
                 line = Trim(line);
-                if (line == password_) {
+                if (constantTimeEquals(line, password_)) {
                     authed = true;
                     break;
                 }
+                // M1: 失败延时 1s 减慢暴力破解
+                std::this_thread::sleep_for(std::chrono::seconds(1));
                 if (attempt < 2) SendLine(clientSock, "密码错误，请重试: ");
                 ++attempt;
             }
