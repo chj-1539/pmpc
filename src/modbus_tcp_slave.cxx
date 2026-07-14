@@ -404,6 +404,7 @@ void ModbusTcpSlave::Stop()
     for (auto& t : clientThreads_)
         if (t.joinable()) t.join();
     clientThreads_.clear();
+    clientDoneFlags_.clear();
 
     std::cout << "[ModbusTcpSlave] 从站已停止" << std::endl;
 }
@@ -429,7 +430,20 @@ void ModbusTcpSlave::AcceptLoop(const SlaveBind& bind, socket& listenSock)
 
             {
                 std::lock_guard<std::mutex> lock(clientMtx_);
-                clientThreads_.emplace_back(&ModbusTcpSlave::ClientThread, this, std::move(client));
+                if (++cleanupCnt_ % 10 == 0) {
+                    for (size_t i = 0; i < clientThreads_.size(); ) {
+                        if (clientDoneFlags_.size() > i &&
+                            clientDoneFlags_[i]->load(std::memory_order_acquire)) {
+                            if (clientThreads_[i].joinable()) clientThreads_[i].join();
+                            clientThreads_.erase(clientThreads_.begin() + i);
+                            clientDoneFlags_.erase(clientDoneFlags_.begin() + i);
+                        } else { ++i; }
+                    }
+                }
+                auto done = std::make_shared<std::atomic<bool>>(false);
+                clientDoneFlags_.push_back(done);
+                clientThreads_.emplace_back(&ModbusTcpSlave::ClientThread, this,
+                    std::move(client), std::move(done));
             }
 
         } catch (const socket_error&) {
@@ -444,8 +458,14 @@ void ModbusTcpSlave::AcceptLoop(const SlaveBind& bind, socket& listenSock)
 
 // ==================== 客户端线程 ====================
 
-void ModbusTcpSlave::ClientThread(socket clientSock)
+void ModbusTcpSlave::ClientThread(socket clientSock,
+                                   std::shared_ptr<std::atomic<bool>> done)
 {
+    struct DoneGuard {
+        std::atomic<bool>* d;
+        ~DoneGuard() { if (d) d->store(true, std::memory_order_release); }
+    } guard{done.get()};
+
     uint8_t buf[RECV_BUF];
 
     if (config_.verbose >= 1) {

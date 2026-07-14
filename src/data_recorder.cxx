@@ -24,6 +24,7 @@
 #include <chrono>
 #include <ctime>
 #include <cstring>
+#include <cctype>
 #include <algorithm>
 
 static constexpr int SCHEMA_VERSION = 1;
@@ -334,6 +335,24 @@ bool DataRecorder::ParseConfig(const std::string& path)
     if (source_.empty()) {
         std::cerr << "[DataRecorder] 错误: source 未设置，必须指定数据源标识" << std::endl;
         return false;
+    }
+    // P2（第二轮）SQL 注入防护：source 用于拼接 SQL 表名/字段，必须限制为
+    // 纯字母数字下划线。虽然 source 来自 INI 配置（非外部用户输入），但防
+    // 御性编程防止畸形 INI 导致的 SQL 注入风险。
+    {
+        bool valid = true;
+        for (char c : source_) {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') {
+                valid = false;
+                break;
+            }
+        }
+        if (source_.size() > 64) valid = false;
+        if (!valid) {
+            std::cerr << "[DataRecorder] 错误: source 只能包含字母/数字/下划线/连字符, 最长 64 字符, 当前值='"
+                      << source_ << "'" << std::endl;
+            return false;
+        }
     }
 
     // ── [di_points] ──

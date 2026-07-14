@@ -176,6 +176,11 @@ void CdtSlave::BuildAndSend(CommIO& io) {
             for (int i = 0; i < 3; i++) { frame[pos++] = SYNC_BYTE; frame[pos++] = SYNC_BYTE2; }
             uint8_t count = (uint8_t)(dev.ymList.size() > 127 ? 127 : dev.ymList.size());
             frame[pos++] = 0x60;  // Func: YM
+            // H11（第二轮）修复：老代码缺少 infoCount + 站号字节（ctrl 字第二
+            // 字节），导致 YM 帧的结构被主站误解 —— 主站 CdtMaster::PortThread
+            // 按 pos==8 解 ctrl_word 需要 buf[7]=infoCount|station。缺了此字
+            // 节后第一个数据字节被当 infoCount，后面全部错位。
+            frame[pos++] = static_cast<uint8_t>(count | (dev.station << 3));
             for (uint16_t i = 0; i < count; i++) {
                 auto& ym = dev.ymList[i]; AiPoint pt;
                 double raw = 0;

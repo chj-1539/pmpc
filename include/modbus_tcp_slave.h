@@ -121,7 +121,7 @@ public:
 private:
     // ── TCP 服务 ──
     void AcceptLoop(const SlaveBind& bind, socket& listenSock);
-    void ClientThread(socket clientSock);
+    void ClientThread(socket clientSock, std::shared_ptr<std::atomic<bool>> done);
 
     // ── 功能码处理 ──
     bool HandleFC01(const SlaveDeviceConfig& dev, const uint8_t* pdu,
@@ -167,7 +167,9 @@ private:
     std::vector<socket> listenSocks_;
     std::vector<std::thread> acceptThreads_;
     std::vector<std::thread> clientThreads_;
+    std::vector<std::shared_ptr<std::atomic<bool>>> clientDoneFlags_;
     std::mutex clientMtx_;
+    int cleanupCnt_ = 0;
 };
 
 // ==================== AppModule 包装 ====================
