@@ -296,6 +296,7 @@ SOE 帧单条记录格式（12 字节）：`CH(1) | DEV(1) | SOE_ID(2小端) | m
 - **Modbus master `if (qty<maxQty) qty=maxQty` 死代码**（H6）：`qty = maxAddr-minAddr+1` 数学上已 ≥ 任何单条 qty；fallback 永远不生效。删除死代码并抽 `ComputeAddrSpan` 模板做不变式测试。
 - **`main.cxx` CheckAllPointChange 无异常保护**（L17）：一次 lambda 抛异常就杀进程。加 try/catch 记 stderr 继续。
 
+**第二轮剩余**（P1+P2 全部修完）：Redundancy（RD-1 tie-breaker 等优先级死锁、RD-2 hbMtx_ 外 connect、RD-3 SyncChannel 自 DoS、RD-4 peer 静默检测、RD-5 atomic 字段）。DebugConsole（DC-1 AutoTask 启动 race、DC-2 AcceptLoop 瞬态恢复、DC-3 done-flag cleanup 代替 detach、M1 密码 constant-time）。PempServer（PS-1 NaN/Inf isfinite 守卫、PS-2 SyncClock 日志配置、PS-3 clientThreads_ cleanup）。iec104_slave（104S-1 binds_ 热重载清除、104S-2 C_SC 长度守卫）。PacketLogger 日切句柄泄漏。SOEQueue 上限。ModuleManager 加锁。Modbus TCP slave 线程 cleanup。CDT slave YM 帧 infoCount。DataRecorder SQL 注入 source 白名单。iec101_master FCB toggle。Modbus RTU slave 多寄存器（DoubleToRawValue 复用）。Modbus RTU 3.5 字符判帧。iec104_master T3 TESTFR 保活 + k=12 窗口。DebugConsole 密码延时防暴力。全部见 tests/ 对应回归测试。
 
 ### 新增模块 checklist
 
