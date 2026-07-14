@@ -262,6 +262,13 @@ void Iec104Master::ChannelThread(int chIdx) {
 
         auto lastGI = std::chrono::steady_clock::now();
         auto lastClock = std::chrono::steady_clock::now();
+        auto lastRecvTime = std::chrono::steady_clock::now();
+        bool testFrPending = false;
+        auto lastTestFrSent = std::chrono::steady_clock::now();
+        // M20（第二轮）: T1=15s(I 帧未 ACK), T3=20s(TESTFR keepalive), k=12
+        constexpr auto T3 = std::chrono::seconds(20);
+        constexpr auto TESTFR_TIMEOUT = std::chrono::seconds(15);
+        constexpr uint32_t K_WINDOW = 12;
         uint8_t buf[RECV_BUF];
 
         while (running_ && connected) {
@@ -273,9 +280,12 @@ void Iec104Master::ChannelThread(int chIdx) {
                     uint32_t ctrl = (uint32_t)((uint32_t)buf[2] | ((uint32_t)buf[3] << 8) | ((uint32_t)buf[4] << 16) | ((uint32_t)buf[5] << 24));
                     size_t asduLen = len > 6 ? len - 6 : 0;
                     const uint8_t* asdu = buf + 6;
-                    if ((ctrl & 0x03) == 0x03) { /* U-frame */ }
-                    else if ((ctrl & 0x03) == 0x01) { /* S-frame */ }
-                    else if (asduLen > 0) {
+                    if ((ctrl & 0x03) == 0x03) {
+                        // U-frame: 如果是对 TESTFR_ACT 的应答 → 清除 pending
+                        if (ctrl == CTRL_U_TESTFR_CON) testFrPending = false;
+                    } else if ((ctrl & 0x03) == 0x01) {
+                        // S-frame（确认）
+                    } else if (asduLen > 0) {
                         // M2: 收到 I 帧后 recvSeq +1，等下次自己发帧时把它填进 rNr
                         recvSeq = (recvSeq + 1) & 0x7FFF;
                         uint16_t coa = 0;
@@ -284,10 +294,36 @@ void Iec104Master::ChannelThread(int chIdx) {
                         // CR-4: 把当前 recvSeq 传下去让 SendSFrame 正确确认
                         HandleIFrame(sock, asdu, asduLen, chIdx, dev, recvSeq);
                     }
+                    lastRecvTime = std::chrono::steady_clock::now();
                 }
                 auto now = std::chrono::steady_clock::now();
-                if (giMs > 0 && (now - lastGI >= std::chrono::milliseconds(giMs))) { SendTotalInterrogation(sock, sendSeq, recvSeq); lastGI = now; }
-                if (clockMs > 0 && (now - lastClock >= std::chrono::milliseconds(clockMs))) { SendClockSync(sock, sendSeq, recvSeq); lastClock = now; }
+
+                // M20（第二轮）: T3 keepalive — 若连接空闲超过 20s，发 TESTFR_ACT
+                if (!testFrPending &&
+                    now - lastRecvTime > T3 &&
+                    now - lastClock > std::chrono::milliseconds(500) /* 避开 GI/clock 临界 */) {
+                    testFrPending = true;
+                    lastTestFrSent = now;
+                    SendUFrame(sock, CTRL_U_TESTFR_ACT);
+                    if (config_.verbose >= 1)
+                        std::cout << "[IEC104] TESTFR_ACT (keepalive)" << std::endl;
+                }
+                // 若 TESTFR_ACT 发出后超过 15s 无 CON → 断连重连
+                if (testFrPending && now - lastTestFrSent > TESTFR_TIMEOUT) {
+                    std::cerr << "[IEC104] TESTFR timeout, reconnect" << std::endl;
+                    throw socket_error(socket_errc::timeout, "TESTFR timeout");
+                }
+
+                // M20: k=12 窗口 —— 待 ACK 帧数 >= 12 时暂不发 GI/Clock 以防超发
+                uint32_t unacked = ((sendSeq - recvSeq) & 0x7FFF);
+                if (unacked < K_WINDOW) {
+                    if (giMs > 0 && (now - lastGI >= std::chrono::milliseconds(giMs))) { SendTotalInterrogation(sock, sendSeq, recvSeq); lastGI = now; }
+                    if (clockMs > 0 && (now - lastClock >= std::chrono::milliseconds(clockMs))) { SendClockSync(sock, sendSeq, recvSeq); lastClock = now; }
+                } else if (config_.verbose >= 1) {
+                    // 窗口满，等确认后再发（不 log 风暴，只打印一次）
+                    static bool warned = false;
+                    if (!warned) { warned = true; std::cout << "[IEC104] k=12 window full, wait for S-frame" << std::endl; }
+                }
             } catch (const socket_error& e) {
                 std::cerr << "[IEC104] Disconnected: " << e.what() << std::endl;
                 connected = false;

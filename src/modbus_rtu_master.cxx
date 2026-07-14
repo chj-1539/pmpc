@@ -489,24 +489,39 @@ bool ModbusRtuMaster::SendAndReceive(CommIO& io, uint8_t station,
 
     try { io.write(frame, frameLen); } catch (const std::exception&) { return false; }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // M24（第二轮）修复：老代码固定 sleep(20ms) 后以"gotByte 后 n==0 立即
+    // break"作为判帧结束 —— 这无视 RTU 规约要求的 3.5 字符静默间隔。部分
+    // 从站字节间有 5-10ms 抖动时，主站误判帧结束 → CRC 失败 → 丢帧。
+    // 改为：立即进入读循环；用波特率计算 3.5 字符间隔微观等待。
+    int baud = io.currentBaud();
+    if (baud <= 0) baud = 9600;
+    // 3.5 字符时间（微秒）= 35000000 / baud（每个字符 11 bit）
+    // 例: 9600 → ~3645 us, 19200 → ~1822 us
+    int intraFrameGapUs = static_cast<int>(35000000LL / baud + 1);
+    if (intraFrameGapUs < 500) intraFrameGapUs = 500;   // >= 0.5ms
 
     uint8_t buf[MAX_FRAME]; size_t pos = 0;
     auto startTime = std::chrono::steady_clock::now();
     bool gotByte = false;
+    auto lastByteTime = std::chrono::steady_clock::now();
 
     while (pos < MAX_FRAME) {
         uint8_t byte;
         try {
             size_t n = io.read(&byte, 1);
             if (n == 0) {
-                if (gotByte) break;
-                if (std::chrono::steady_clock::now() - startTime > std::chrono::milliseconds(timeoutMs)) break;
+                auto now = std::chrono::steady_clock::now();
+                if (gotByte) {
+                    // 若已收到字节且静默超过 3.5 字符 → 判帧结束
+                    if (now - lastByteTime > std::chrono::microseconds(intraFrameGapUs))
+                        break;
+                }
+                if (now - startTime > std::chrono::milliseconds(timeoutMs)) break;
                 continue;
             }
         } catch (const std::exception&) { break; }
         buf[pos++] = byte; gotByte = true;
-        startTime = std::chrono::steady_clock::now();
+        lastByteTime = std::chrono::steady_clock::now();
     }
     if (pos < 3) return false;
 
