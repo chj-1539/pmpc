@@ -363,7 +363,9 @@ bool RemoteDataMgr::GetAo(uint16_t ch, uint16_t dev, uint16_t pt, AoPoint& out)
 
 void RemoteDataMgr::CheckAllPointChange()
 {
+#ifdef PMPC_DEBUG_DI_AI_PRINT
     uint64_t nowTs = NowMs();
+#endif
 
     // 取 (chId, devNo) 快照而非 Device* 指针，避免 LoadConfig 热重载时悬空
     struct DevSnap { uint16_t chId; uint16_t devNo; };
@@ -386,12 +388,14 @@ void RemoteDataMgr::CheckAllPointChange()
                 if (pt.pointNo == 1) continue;
                 if (pt.value != pt.lastVal)
                 {
+#ifdef PMPC_DEBUG_DI_AI_PRINT
                     std::cout << "[DI变化] 通道:" << s.chId
                               << " 设备:" << s.devNo
                               << " 点位:" << pt.pointNo
                               << " 旧值:" << pt.lastVal
                               << " 新值:" << pt.value
                               << " 时间戳:" << nowTs << std::endl;
+#endif
                     pt.lastVal = pt.value;
                 }
             }
@@ -401,12 +405,14 @@ void RemoteDataMgr::CheckAllPointChange()
             {
                 if (pt.value != pt.lastVal)
                 {
+#ifdef PMPC_DEBUG_DI_AI_PRINT
                     std::cout << "[AI更新] 通道:" << s.chId
                               << " 设备:" << s.devNo
                               << " 点位:" << pt.pointNo
                               << " 旧值:" << pt.lastVal
                               << " 新值:" << pt.value
                               << " 时间戳:" << nowTs << std::endl;
+#endif
                     pt.lastVal = pt.value;
                 }
             }

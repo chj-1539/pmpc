@@ -41,6 +41,7 @@ struct DataPointKey {
 
 struct AIPointConfig {
     std::string tag;
+    std::string unit;        // 工程单位（kV/A/MW/°C…），曲线 Y 轴标注用
     int intervalMs = 5000;   // 存盘间隔
     int64_t lastSaveMs = 0;  // 上次存盘时间
 };

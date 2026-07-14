@@ -158,6 +158,11 @@ PacketLogger& PacketLogger::Instance()
 
 PacketLogger::~PacketLogger()
 {
+    CloseAll();
+}
+
+void PacketLogger::CloseAll()
+{
     std::lock_guard<std::mutex> lock(fileMtx_);
     for (auto& [path, entry] : files_) {
         if (entry.stream.is_open())
@@ -428,19 +433,20 @@ PacketLoggerModule::~PacketLoggerModule() { Stop(); }
 bool PacketLoggerModule::LoadConfig(const std::string& cfgPath)
 {
     cfgPath_ = cfgPath;
+    auto& pl = PacketLogger::Instance();
     IniReader ini;
     if (!ini.Load(cfgPath)) {
         std::cout << "[PacketLogger] 无配置文件，使用默认设置" << std::endl;
-        logger_.Init("logs/traffic");
+        pl.Init("logs/traffic");
         loaded_ = true;
         return true;
     }
 
     std::string logDir = ini.Get("global", "log_dir", "logs/traffic");
     int parseEn = ini.GetInt("global", "parse", 1);
-    logger_.Init(logDir);
-    logger_.SetParseEnabled(parseEn != 0);
-    logger_.SetMaxDays(ini.GetInt("global", "max_days", 30));
+    pl.Init(logDir);
+    pl.SetParseEnabled(parseEn != 0);
+    pl.SetMaxDays(ini.GetInt("global", "max_days", 30));
 
     loaded_ = true;
     std::cout << "[PacketLogger] 配置加载: dir=" << logDir
@@ -464,9 +470,9 @@ bool PacketLoggerModule::Start()
     if (running_) return true;
 
     // ── 注册内建解析器 ──
-    logger_.RegisterParser(std::make_unique<ModbusTcpParser>());
+    PacketLogger::Instance().RegisterParser(std::make_unique<ModbusTcpParser>());
 
-    logger_.SetEnabled(false);
+    PacketLogger::Instance().SetEnabled(false);
     running_ = true;
     std::cout << "[PacketLogger] 模块已就绪（记录未启用，需通过调试控制台启动）" << std::endl;
     return true;
@@ -475,7 +481,8 @@ bool PacketLoggerModule::Start()
 void PacketLoggerModule::Stop()
 {
     running_ = false;
-    logger_.SetEnabled(false);
+    PacketLogger::Instance().SetEnabled(false);
+    PacketLogger::Instance().CloseAll();
 }
 
 bool PacketLoggerModule::IsRunning() const

@@ -163,9 +163,9 @@ void ConfigErrorReporter::PrintSummary() const
 bool RemoteDataMgr::LoadConfig(const std::string& iniPath,
                                ConfigErrorReporter* reporter)
 {
-    std::lock_guard<std::mutex> lock(structMtx_);
-    ClearAll();
-
+    // 先尝试打开文件，避免在持锁且已清表后才发现文件不可读（
+    // 否则 ClearAll 已清空 channels_ 但 fin 打开失败 → 点表永久空，
+    // 用户键入 reload point 后所有四遥命令均失效）。
     std::ifstream fin(iniPath);
     if (!fin.is_open())
     {
@@ -175,6 +175,12 @@ bool RemoteDataMgr::LoadConfig(const std::string& iniPath,
             reporter->Report("错误", msg);
         return false;
     }
+
+    std::lock_guard<std::mutex> lock(structMtx_);
+
+    // 备份旧通道表；若新加载失败（parse 出错 / 空结果）则恢复。
+    auto oldChannels = std::move(channels_);
+    ClearAll();   // channels_ 已在上面 move 为空，此处只清 pulse/ao 队列
 
     std::string line, curSec;
     uint16_t curChId = 0;
@@ -400,6 +406,18 @@ bool RemoteDataMgr::LoadConfig(const std::string& iniPath,
     for (const auto& ch : channels_)
         totalDevices += ch.devList.size();
 
+    if (channels_.empty())
+    {
+        // 新点表无有效通道，回滚到旧配置
+        channels_ = std::move(oldChannels);
+        std::string msg = "点表加载结果为空，已回滚到旧配置";
+        std::cerr << msg << std::endl;
+        if (reporter)
+            reporter->Report("错误", msg);
+        if (reporter) { reporter->PrintSummary(); reporter->Save(iniPath); }
+        return false;
+    }
+
     std::cout << "[LoadConfig] 加载完成: "
               << channels_.size() << " 通道, "
               << totalDevices << " 设备" << std::endl;
@@ -410,5 +428,5 @@ bool RemoteDataMgr::LoadConfig(const std::string& iniPath,
         reporter->Save(iniPath);
     }
 
-    return !channels_.empty();
+    return true;
 }

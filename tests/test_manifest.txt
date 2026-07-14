@@ -26,6 +26,7 @@ test_event_bus_isolated_include | test_event_bus_isolated_include.cxx |
 test_config_reader_overflow     | test_config_reader_overflow.cxx     | src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx
 test_cdt_master_parser          | test_cdt_master_parser.cxx          |
 test_debug_console_lifecycle    | test_debug_console_lifecycle.cxx    |
+test_debug_console_cmd_parse    | test_debug_console_cmd_parse.cxx    |
 test_debug_console_telnet       | test_debug_console_telnet.cxx       |
 test_redundancy_frame_codec     | test_redundancy_frame_codec.cxx     | src/redundancy.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/socket.cpp
 test_redundancy_role_transitions| test_redundancy_role_transitions.cxx| src/redundancy.cxx src/pmpc_data_mgr.cxx src/pmpc_config_reader.cxx src/ini_reader.cxx src/soe_queue.cxx src/protocol.cxx src/socket.cpp

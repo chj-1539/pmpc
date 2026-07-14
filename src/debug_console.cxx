@@ -155,10 +155,26 @@ void DebugConsole::Stop()
 
     {
         std::lock_guard<std::mutex> lock(clientMtx_);
-        for (auto& t : clientThreads_)
-            if (t.joinable()) t.join();
-        clientThreads_.clear();
-        clientDoneFlags_.clear();
+        // 跳过当前线程（只 detach），避免 self-join UB：
+        //   stop debug_console 由 ClientThread 内的命令触发，
+        //   此时 Stop() 在 ClientThread 上下文中执行，
+        //   join(clientThreads_ 中的自己) 是 UB → terminate。
+        //   当前线程已看见 running_=false，下一轮 recv 迭代会自行退出。
+        auto selfId = std::this_thread::get_id();
+        for (size_t i = 0; i < clientThreads_.size(); ) {
+            if (clientThreads_[i].get_id() == selfId) {
+                if (clientThreads_[i].joinable())
+                    clientThreads_[i].detach();
+                clientThreads_.erase(clientThreads_.begin() + i);
+                clientDoneFlags_.erase(clientDoneFlags_.begin() + i);
+                // 不 ++i；erase 后下一个元素滑到 i
+            } else {
+                if (clientThreads_[i].joinable())
+                    clientThreads_[i].join();
+                clientThreads_.erase(clientThreads_.begin() + i);
+                clientDoneFlags_.erase(clientDoneFlags_.begin() + i);
+            }
+        }
     }
 
     std::cout << "[DebugConsole] 调试控制台已停止" << std::endl;
@@ -1119,7 +1135,8 @@ void DebugConsole::CmdLog(socket& sock, const std::vector<std::string>& args)
     }
     else if (sub == "stop") {
         logger.SetEnabled(false);
-        SendLine(sock, "OK: 报文记录已停止");
+        logger.CloseAll();
+        SendLine(sock, "OK: 报文记录已停止（文件句柄已释放）");
     }
     else if (sub == "status") {
         SendLine(sock, logger.GetStatus());

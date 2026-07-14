@@ -92,6 +92,8 @@ public:
     // ── 控制 ──
     void SetEnabled(bool en) { enabled_ = en; }
     bool IsEnabled() const { return enabled_; }
+    /// 关闭所有已打开的文件句柄（log stop 时释放文件，避免 .log 被锁定）
+    void CloseAll();
 
     void SetParseEnabled(bool en) { parseEnabled_ = en; }
     bool IsParseEnabled() const { return parseEnabled_; }
@@ -164,11 +166,15 @@ public:
     bool Start() override;
     void Stop() override;
     bool IsRunning() const override;
-    PacketLogger& GetLogger() { return logger_; }
+    /// 返回全局单例的 PacketLogger，与所有协议模块（modbus_tcp_master、
+    /// iec104_master 等）内部调用的 PacketLogger::Instance() 保持一致。
+    /// 修复：老代码返回独立成员 logger_，log start 只启用了成员实例，
+    /// 但协议模块全指向单例 → 报文永不落盘。
+    PacketLogger& GetLogger() { return PacketLogger::Instance(); }
 
     static PacketLoggerModule* GetInstance();
 private:
-    PacketLogger logger_;
+    // logger_ 已移除 —— 所有路径统一使用 PacketLogger::Instance() 单例
     std::string cfgPath_;
     bool loaded_ = false;
     bool running_ = false;

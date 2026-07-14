@@ -29,7 +29,7 @@ set MYSQL_INC=-I"C:\Program Files\MySQL\MySQL Server 8.4\include"
 set MYSQL_LIB=-L"C:\Program Files\MySQL\MySQL Server 8.4\lib"
 
 if /I "%MODE%"=="debug" (
-    set EXTRA=-g -O0
+    set EXTRA=-g -O0 -DPMPC_DEBUG_DI_AI_PRINT
     set OUT=pmpd.exe
     echo [Build] Debug mode --^> %OUT%
 ) else if /I "%MODE%"=="release" (
